@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
@@ -50,17 +50,17 @@ pub struct TransferRequest {
     pub total_bytes: u64,
 }
 
-// Not derived Debug because oneshot::Sender does not implement Debug.
 pub struct RiftState {
     pub own_id: String,
     pub own_device_name: String,
     pub own_port: u16,
     pub devices: HashMap<String, Device>,
     pub pending_transfers: HashMap<String, PendingTransfer>,
-    // When an outgoing transfer is waiting for accept/decline, the sender
-    // is stored here. The server's accept/decline handlers take it out and
-    // signal the waiting upload task.
     pub transfer_notifiers: HashMap<String, tokio::sync::oneshot::Sender<bool>>,
+    /// Device IDs with a live TCP rift channel.
+    pub rifted_devices: HashSet<String>,
+    /// Consecutive heartbeat failures per device — evict at 3.
+    pub heartbeat_failures: HashMap<String, u8>,
 }
 
 pub type SharedState = Arc<Mutex<RiftState>>;
@@ -73,5 +73,7 @@ pub fn new_shared_state() -> SharedState {
         devices: HashMap::new(),
         pending_transfers: HashMap::new(),
         transfer_notifiers: HashMap::new(),
+        rifted_devices: HashSet::new(),
+        heartbeat_failures: HashMap::new(),
     }))
 }

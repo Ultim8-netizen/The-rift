@@ -1,5 +1,5 @@
 import { useRiftStore } from "@/store/riftStore";
-import { useTransfer } from "@/hooks/useTransfer";
+import { useTransferActions } from "@/hooks/useTransfer";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -11,7 +11,7 @@ function formatBytes(bytes: number): string {
 
 export function AcceptDialog() {
   const req = useRiftStore((s) => s.incomingRequest);
-  const { acceptTransfer, declineTransfer } = useTransfer();
+  const { acceptTransfer, declineTransfer } = useTransferActions();
 
   if (!req) return null;
 

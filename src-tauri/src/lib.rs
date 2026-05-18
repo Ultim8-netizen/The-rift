@@ -35,11 +35,7 @@ async fn get_file_metadata(paths: Vec<String>) -> Result<Vec<StagedFile>, String
             .unwrap_or("unknown")
             .to_string();
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        out.push(StagedFile {
-            name,
-            path,
-            size_bytes: size,
-        });
+        out.push(StagedFile { name, path, size_bytes: size });
     }
     Ok(out)
 }
@@ -53,6 +49,30 @@ async fn start_discovery(
     tauri::async_runtime::spawn(async move {
         if let Err(e) = discovery::start_discovery(s, app).await {
             eprintln!("[Discovery] Error: {e}");
+        }
+    });
+    Ok(())
+}
+
+/// Clear all known devices and kick off a fresh mDNS scan. The frontend
+/// listens for the `devices_cleared` event to wipe its local list.
+#[tauri::command]
+async fn rescan(
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    {
+        let mut s = state.lock().await;
+        s.devices.clear();
+        s.rifted_devices.clear();
+        s.heartbeat_failures.clear();
+    }
+    let _ = app.emit("devices_cleared", &serde_json::Value::Null);
+
+    let s = state.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = discovery::start_discovery(s, app).await {
+            eprintln!("[Rescan] Discovery error: {e}");
         }
     });
     Ok(())
@@ -98,14 +118,8 @@ async fn send_files(
     let state_clone = state.inner().clone();
 
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = transfer::send_files_to_device(
-            transfer_id,
-            target,
-            files,
-            state_clone,
-            app,
-        )
-        .await
+        if let Err(e) =
+            transfer::send_files_to_device(transfer_id, target, files, state_clone, app).await
         {
             eprintln!("[Send] Error: {e}");
         }
@@ -131,13 +145,11 @@ async fn accept_transfer(
         "http://{}:{}/accept/{}",
         pending.sender_device.ip, pending.sender_device.port, transfer_id
     );
-
     reqwest::Client::new()
         .post(&url)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-
     Ok(())
 }
 
@@ -158,13 +170,11 @@ async fn decline_transfer(
         "http://{}:{}/decline/{}",
         pending.sender_device.ip, pending.sender_device.port, transfer_id
     );
-
     reqwest::Client::new()
         .post(&url)
         .send()
         .await
         .map_err(|e| e.to_string())?;
-
     Ok(())
 }
 
@@ -181,6 +191,7 @@ pub fn run() {
             get_app_state,
             get_file_metadata,
             start_discovery,
+            rescan,
             send_files,
             accept_transfer,
             decline_transfer,
@@ -190,28 +201,58 @@ pub fn run() {
             let state_clone = shared_state.clone();
 
             tauri::async_runtime::spawn(async move {
+                // Resolve device name
                 let name = hostname::get()
                     .ok()
                     .and_then(|h| h.into_string().ok())
                     .unwrap_or_else(|| "Rift Device".to_string());
-
                 state_clone.lock().await.own_device_name = name;
 
-                let s = state_clone.clone();
-                let a = app_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    if let Err(e) = transfer::start_transfer_server(s, a).await {
-                        eprintln!("[Server] Fatal: {e}");
-                    }
-                });
+                let our_ip = local_ip_address::local_ip()
+                    .ok()
+                    .and_then(|ip| match ip {
+                        std::net::IpAddr::V4(v4) => Some(v4),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
 
-                let s = state_clone.clone();
-                let a = app_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    if let Err(e) = network::start_heartbeat(s, a).await {
-                        eprintln!("[Heartbeat] Fatal: {e}");
-                    }
-                });
+                // Captive portal — forces OS to see "internet" on the local
+                // network, preventing WiFi disconnection. Needs admin/root for
+                // full effect; falls back gracefully.
+                let _ = network::captive::start_captive_portal(our_ip).await;
+
+                // TCP rift channel server — persistent PING/PONG keepalive
+                {
+                    let s = state_clone.clone();
+                    let a = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = network::start_channel_server(s, a).await {
+                            eprintln!("[ChannelServer] Fatal: {e}");
+                        }
+                    });
+                }
+
+                // Transfer server
+                {
+                    let s = state_clone.clone();
+                    let a = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = transfer::start_transfer_server(s, a).await {
+                            eprintln!("[Server] Fatal: {e}");
+                        }
+                    });
+                }
+
+                // Heartbeat (3-failure tolerance)
+                {
+                    let s = state_clone.clone();
+                    let a = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = network::start_heartbeat(s, a).await {
+                            eprintln!("[Heartbeat] Fatal: {e}");
+                        }
+                    });
+                }
             });
 
             Ok(())

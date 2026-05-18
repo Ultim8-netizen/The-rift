@@ -2,14 +2,11 @@ import { useTauriEvent, useInvoke } from "./useTauri";
 import { useRiftStore } from "@/store/riftStore";
 import { ChunkProgress, IncomingRequest, Transfer } from "@/types";
 
-export function useTransfer() {
-  const { call } = useInvoke();
+// ── Event listeners — call ONCE in App.tsx only ───────────────────────────────
+export function useTransferEvents() {
   const addTransfer = useRiftStore((s) => s.addTransfer);
   const updateTransfer = useRiftStore((s) => s.updateTransfer);
   const setIncomingRequest = useRiftStore((s) => s.setIncomingRequest);
-  const clearStagedFiles = useRiftStore((s) => s.clearStagedFiles);
-  const selectedDevice = useRiftStore((s) => s.selectedDevice);
-  const stagedFiles = useRiftStore((s) => s.stagedFiles);
 
   useTauriEvent<Transfer>("transfer_started", (transfer) => {
     addTransfer(transfer);
@@ -38,10 +35,7 @@ export function useTransfer() {
   useTauriEvent<{ transferId: string; message: string }>(
     "transfer_error",
     ({ transferId, message }) => {
-      updateTransfer(transferId, {
-        status: "error",
-        errorMessage: message,
-      });
+      updateTransfer(transferId, { status: "error", errorMessage: message });
     }
   );
 
@@ -64,15 +58,33 @@ export function useTransfer() {
     });
     setIncomingRequest(req);
   });
+}
+
+// ── Action functions — safe to call from any component ────────────────────────
+export function useTransferActions() {
+  const { call } = useInvoke();
+  const clearStagedFiles = useRiftStore((s) => s.clearStagedFiles);
+  const selectedDevice = useRiftStore((s) => s.selectedDevice);
+  const stagedFiles = useRiftStore((s) => s.stagedFiles);
+  const setIncomingRequest = useRiftStore((s) => s.setIncomingRequest);
+  const updateTransfer = useRiftStore((s) => s.updateTransfer);
+  const isSending = useRiftStore((s) => s.isSending);
+  const setIsSending = useRiftStore((s) => s.setIsSending);
 
   async function sendFiles() {
-    if (!selectedDevice || stagedFiles.length === 0) return;
+    if (isSending || !selectedDevice || stagedFiles.length === 0) return;
+    setIsSending(true);
     const filePaths = stagedFiles.map((f) => f.path);
-    await call("send_files", {
-      targetDeviceId: selectedDevice.id,
-      filePaths,
-    });
+    // Clear BEFORE the await so re-clicks cannot queue another send
     clearStagedFiles();
+    try {
+      await call("send_files", {
+        targetDeviceId: selectedDevice.id,
+        filePaths,
+      });
+    } finally {
+      setIsSending(false);
+    }
   }
 
   async function acceptTransfer(transferId: string) {

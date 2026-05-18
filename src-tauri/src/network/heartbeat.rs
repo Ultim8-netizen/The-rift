@@ -1,16 +1,16 @@
 use crate::state::SharedState;
 use tauri::{AppHandle, Emitter};
 
-// Every 5 seconds, ping each known device. If a device does not respond,
-// remove it from the list and emit device_lost. This catches devices that
-// disappeared without sending an mDNS goodbye packet (e.g. hard shutdown).
+const HEARTBEAT_INTERVAL_SECS: u64 = 5;
+const EVICT_AFTER_FAILURES: u8 = 3; // 15 s of silence before eviction
+
 pub async fn start_heartbeat(state: SharedState, app: AppHandle) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
         .build()?;
 
     loop {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(HEARTBEAT_INTERVAL_SECS)).await;
 
         let devices: Vec<crate::state::Device> = {
             let s = state.lock().await;
@@ -19,16 +19,21 @@ pub async fn start_heartbeat(state: SharedState, app: AppHandle) -> anyhow::Resu
 
         for device in devices {
             let url = format!("http://{}:{}/ping", device.ip, device.port);
-            let state_clone = state.clone();
-            let app_clone = app.clone();
-            let client_clone = client.clone();
+            let sc = state.clone();
+            let ac = app.clone();
+            let cc = client.clone();
 
             tokio::spawn(async move {
                 let start = std::time::Instant::now();
-                match client_clone.get(&url).send().await {
+                match cc.get(&url).send().await {
                     Ok(_) => {
                         let latency = start.elapsed().as_millis() as u64;
-                        let _ = app_clone.emit(
+                        // Success — reset failure counter
+                        {
+                            let mut s = sc.lock().await;
+                            s.heartbeat_failures.remove(&device.id);
+                        }
+                        let _ = ac.emit(
                             "device_latency_update",
                             &serde_json::json!({
                                 "deviceId": device.id,
@@ -37,12 +42,32 @@ pub async fn start_heartbeat(state: SharedState, app: AppHandle) -> anyhow::Resu
                         );
                     }
                     Err(_) => {
-                        // Device unreachable: remove and notify frontend
-                        state_clone.lock().await.devices.remove(&device.id);
-                        let _ = app_clone.emit(
-                            "device_lost",
-                            &serde_json::json!({ "id": device.id }),
+                        let failures = {
+                            let mut s = sc.lock().await;
+                            let count = s
+                                .heartbeat_failures
+                                .entry(device.id.clone())
+                                .or_insert(0);
+                            *count += 1;
+                            *count
+                        };
+
+                        eprintln!(
+                            "[Heartbeat] {} unreachable ({}/{})",
+                            device.id, failures, EVICT_AFTER_FAILURES
                         );
+
+                        if failures >= EVICT_AFTER_FAILURES {
+                            let mut s = sc.lock().await;
+                            s.devices.remove(&device.id);
+                            s.heartbeat_failures.remove(&device.id);
+                            s.rifted_devices.remove(&device.id);
+                            drop(s);
+                            let _ = ac.emit(
+                                "device_lost",
+                                &serde_json::json!({ "id": device.id }),
+                            );
+                        }
                     }
                 }
             });

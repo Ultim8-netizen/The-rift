@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRiftStore } from "@/store/riftStore";
-import { useTransfer } from "@/hooks/useTransfer";
+import { useTransferActions } from "@/hooks/useTransfer";
 import { useInvoke } from "@/hooks/useTauri";
 import { StagedFile } from "@/types";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -20,35 +20,35 @@ export function DropZone() {
   const setStagedFiles = useRiftStore((s) => s.setStagedFiles);
   const clearStagedFiles = useRiftStore((s) => s.clearStagedFiles);
   const selectedDevice = useRiftStore((s) => s.selectedDevice);
-  const { sendFiles } = useTransfer();
+  const isSending = useRiftStore((s) => s.isSending);
+  const { sendFiles } = useTransferActions();
   const { call } = useInvoke();
 
   const totalBytes = stagedFiles.reduce((sum, f) => sum + f.sizeBytes, 0);
-  const canSend = stagedFiles.length > 0 && selectedDevice !== null;
+  const canSend = stagedFiles.length > 0 && selectedDevice !== null && !isSending;
 
-  // Resolve file metadata (name + size) from paths via Rust
-  async function stageFromPaths(paths: string[]) {
-    if (paths.length === 0) return;
-    try {
-      const files = await call<StagedFile[]>("get_file_metadata", { paths });
-      setStagedFiles(files);
-    } catch (e) {
-      console.error("get_file_metadata failed:", e);
-    }
-  }
+  const stageFromPaths = useCallback(
+    async (paths: string[]) => {
+      if (paths.length === 0) return;
+      try {
+        const files = await call<StagedFile[]>("get_file_metadata", { paths });
+        setStagedFiles(files);
+      } catch (e) {
+        console.error("get_file_metadata failed:", e);
+      }
+    },
+    [call, setStagedFiles]
+  );
 
-  // Tauri native drag-drop event (gives real file system paths)
   useEffect(() => {
     let unlisten: (() => void) | null = null;
-
     getCurrentWebview()
       .onDragDropEvent((event) => {
         if (event.payload.type === "over") {
           setIsDragging(true);
         } else if (event.payload.type === "drop") {
           setIsDragging(false);
-          const paths = event.payload.paths ?? [];
-          stageFromPaths(paths);
+          stageFromPaths(event.payload.paths ?? []);
         } else {
           setIsDragging(false);
         }
@@ -56,13 +56,11 @@ export function DropZone() {
       .then((fn) => {
         unlisten = fn;
       });
-
     return () => {
       unlisten?.();
     };
-  }, []);
+  }, [stageFromPaths]);
 
-  // File dialog browse
   async function browseFiles() {
     try {
       const result = await open({ multiple: true, directory: false });
@@ -101,9 +99,7 @@ export function DropZone() {
         {stagedFiles.length === 0 ? (
           <>
             <div className="text-4xl opacity-30">⤵</div>
-            <p className="text-sm text-rift-muted text-center">
-              Drop files here
-            </p>
+            <p className="text-sm text-rift-muted text-center">Drop files here</p>
             <p className="text-xs text-rift-muted/60 text-center">
               Any file type. Any size.
             </p>
@@ -165,7 +161,7 @@ export function DropZone() {
           }
         `}
       >
-        SEND
+        {isSending ? "SENDING…" : "SEND"}
       </button>
     </div>
   );
