@@ -72,6 +72,12 @@ export interface IncomingRequest {
   totalBytes: number;
 }
 
+export interface IncomingText {
+  transferId: string;
+  text: string;
+  senderDevice: Device;
+}
+
 export interface AppState {
   ownDeviceName: string;
   networkStatus: NetworkStatus;

@@ -3,6 +3,7 @@ import {
   Device,
   Transfer,
   IncomingRequest,
+  IncomingText,
   NetworkStatus,
   StagedFile,
 } from "@/types";
@@ -21,12 +22,10 @@ interface RiftStore {
   updateDeviceLatency: (deviceId: string, latencyMs: number) => void;
   selectDevice: (device: Device | null) => void;
 
-  /** Device IDs with an active TCP rift channel. */
   riftedDevices: string[];
   addRiftedDevice: (id: string) => void;
   removeRiftedDevice: (id: string) => void;
 
-  /** Device shown in the detail popup (null = popup closed). */
   devicePopup: Device | null;
   setDevicePopup: (device: Device | null) => void;
 
@@ -38,11 +37,14 @@ interface RiftStore {
   incomingRequest: IncomingRequest | null;
   setIncomingRequest: (req: IncomingRequest | null) => void;
 
+  /** Incoming text payload waiting to be dismissed by the user. */
+  incomingText: IncomingText | null;
+  setIncomingText: (payload: IncomingText | null) => void;
+
   stagedFiles: StagedFile[];
   setStagedFiles: (files: StagedFile[]) => void;
   clearStagedFiles: () => void;
 
-  /** Prevents duplicate send invocations. */
   isSending: boolean;
   setIsSending: (v: boolean) => void;
 }
@@ -102,7 +104,6 @@ export const useRiftStore = create<RiftStore>((set) => ({
   transfers: [],
   addTransfer: (transfer) =>
     set((s) => ({
-      // Deduplicate by id — prevents double-add from any stray duplicate event
       transfers: s.transfers.some((t) => t.id === transfer.id)
         ? s.transfers
         : [transfer, ...s.transfers],
@@ -118,6 +119,9 @@ export const useRiftStore = create<RiftStore>((set) => ({
 
   incomingRequest: null,
   setIncomingRequest: (req) => set({ incomingRequest: req }),
+
+  incomingText: null,
+  setIncomingText: (payload) => set({ incomingText: payload }),
 
   stagedFiles: [],
   setStagedFiles: (files) => set({ stagedFiles: files }),

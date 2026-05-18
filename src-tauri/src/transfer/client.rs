@@ -34,12 +34,10 @@ pub async fn send_files_to_device(
     let total_bytes: u64 = files.iter().map(|f| f.size_bytes).sum();
     let total_files = files.len();
 
-    // Build the HTTP client shared across all chunk uploads
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    // POST the transfer request to the target device
     let req_url = format!("http://{}:{}/request", target.ip, target.port);
     let req_body = TransferRequest {
         transfer_id: transfer_id.clone(),
@@ -51,7 +49,6 @@ pub async fn send_files_to_device(
     client.post(&req_url).json(&req_body).send().await
         .map_err(|e| anyhow::anyhow!("Failed to reach target: {e}"))?;
 
-    // Notify our own frontend that the transfer exists and is waiting
     let _ = app.emit(
         "transfer_started",
         &serde_json::json!({
@@ -72,8 +69,6 @@ pub async fn send_files_to_device(
         }),
     );
 
-    // Register a oneshot channel so the server's accept handler can
-    // signal us when the recipient responds.
     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
     state
         .lock()
@@ -81,7 +76,6 @@ pub async fn send_files_to_device(
         .transfer_notifiers
         .insert(transfer_id.clone(), tx);
 
-    // Wait up to 60 seconds for the recipient to accept or decline
     let accepted = match tokio::time::timeout(
         std::time::Duration::from_secs(60),
         rx,
@@ -91,7 +85,6 @@ pub async fn send_files_to_device(
         Ok(Ok(v)) => v,
         Ok(Err(_)) => false,
         Err(_) => {
-            // Timeout: clean up notifier
             state.lock().await.transfer_notifiers.remove(&transfer_id);
             false
         }
@@ -108,7 +101,6 @@ pub async fn send_files_to_device(
         return Ok(());
     }
 
-    // Upload each file sequentially
     let base_url = format!("http://{}:{}", target.ip, target.port);
     let start = std::time::Instant::now();
     let mut global_bytes_sent: u64 = 0;
@@ -203,6 +195,68 @@ async fn upload_file(
                 "totalBytes": total_bytes,
                 "speedBytesPerSec": speed,
                 "etaSeconds": eta,
+            }),
+        );
+    }
+
+    Ok(())
+}
+
+/// Send raw text to a peer device.
+/// The receiver emits an `incoming_text` event on their side.
+pub async fn send_text_to_device(
+    transfer_id: String,
+    target: Device,
+    text: String,
+    state: SharedState,
+    app: AppHandle,
+) -> anyhow::Result<()> {
+    let (own_id, own_name, own_port) = {
+        let s = state.lock().await;
+        (s.own_id.clone(), s.own_device_name.clone(), s.own_port)
+    };
+
+    let own_ip = local_ip_address::local_ip()
+        .unwrap_or_else(|_| "127.0.0.1".parse().unwrap())
+        .to_string();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+
+    let url = format!("http://{}:{}/text/{}", target.ip, target.port, transfer_id);
+
+    let resp = client
+        .post(&url)
+        .header("x-sender-id", &own_id)
+        .header("x-sender-name", &own_name)
+        .header("x-sender-ip", &own_ip)
+        .header("x-sender-port", own_port.to_string())
+        .header("x-sender-os", std::env::consts::OS)
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(text.clone())
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Text send failed: {e}"))?;
+
+    if resp.status().is_success() {
+        let _ = app.emit(
+            "text_sent",
+            &serde_json::json!({
+                "transferId": transfer_id,
+                "targetDevice": {
+                    "id": target.id,
+                    "name": target.name,
+                },
+                "length": text.len(),
+            }),
+        );
+    } else {
+        let _ = app.emit(
+            "transfer_error",
+            &serde_json::json!({
+                "transferId": transfer_id,
+                "message": format!("Text send failed: HTTP {}", resp.status()),
             }),
         );
     }

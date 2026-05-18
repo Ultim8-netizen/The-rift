@@ -6,10 +6,9 @@ import { TransferQueue } from "@/components/TransferQueue";
 import { AcceptDialog } from "@/components/AcceptDialog";
 import { DevicePopup } from "@/components/DevicePopup";
 import { StatusBar } from "@/components/StatusBar";
+import { IncomingTextDialog } from "@/components/IncomingTextDialog";
 
 export default function App() {
-  // Event listeners registered EXACTLY ONCE here.
-  // No other component calls these hooks.
   useDevices();
   useTransferEvents();
 
@@ -23,6 +22,7 @@ export default function App() {
       <StatusBar />
       <AcceptDialog />
       <DevicePopup />
+      <IncomingTextDialog />
     </div>
   );
 }

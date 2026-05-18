@@ -1,12 +1,13 @@
 import { useTauriEvent, useInvoke } from "./useTauri";
 import { useRiftStore } from "@/store/riftStore";
-import { ChunkProgress, IncomingRequest, Transfer } from "@/types";
+import { ChunkProgress, IncomingRequest, IncomingText, Transfer } from "@/types";
 
 // ── Event listeners — call ONCE in App.tsx only ───────────────────────────────
 export function useTransferEvents() {
   const addTransfer = useRiftStore((s) => s.addTransfer);
   const updateTransfer = useRiftStore((s) => s.updateTransfer);
   const setIncomingRequest = useRiftStore((s) => s.setIncomingRequest);
+  const setIncomingText = useRiftStore((s) => s.setIncomingText);
 
   useTauriEvent<Transfer>("transfer_started", (transfer) => {
     addTransfer(transfer);
@@ -58,6 +59,11 @@ export function useTransferEvents() {
     });
     setIncomingRequest(req);
   });
+
+  // Text arrives silently — no accept/decline, just surface the dialog.
+  useTauriEvent<IncomingText>("incoming_text", (payload) => {
+    setIncomingText(payload);
+  });
 }
 
 // ── Action functions — safe to call from any component ────────────────────────
@@ -75,7 +81,6 @@ export function useTransferActions() {
     if (isSending || !selectedDevice || stagedFiles.length === 0) return;
     setIsSending(true);
     const filePaths = stagedFiles.map((f) => f.path);
-    // Clear BEFORE the await so re-clicks cannot queue another send
     clearStagedFiles();
     try {
       await call("send_files", {
@@ -85,6 +90,14 @@ export function useTransferActions() {
     } finally {
       setIsSending(false);
     }
+  }
+
+  async function sendText(text: string) {
+    if (!selectedDevice || text.trim().length === 0) return;
+    await call("send_text", {
+      targetDeviceId: selectedDevice.id,
+      text,
+    });
   }
 
   async function acceptTransfer(transferId: string) {
@@ -99,5 +112,5 @@ export function useTransferActions() {
     await call("decline_transfer", { transferId });
   }
 
-  return { sendFiles, acceptTransfer, declineTransfer };
+  return { sendFiles, sendText, acceptTransfer, declineTransfer };
 }

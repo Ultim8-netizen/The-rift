@@ -26,10 +26,7 @@ pub async fn start_transfer_server(
 ) -> anyhow::Result<()> {
     let port = state.lock().await.own_port;
 
-    let srv = Srv {
-        state,
-        app,
-    };
+    let srv = Srv { state, app };
 
     let router = Router::new()
         .route("/ping", get(handle_ping))
@@ -37,6 +34,7 @@ pub async fn start_transfer_server(
         .route("/accept/:tid", post(handle_accept))
         .route("/decline/:tid", post(handle_decline))
         .route("/upload/:tid/:fi/:ci", post(handle_upload))
+        .route("/text/:tid", post(handle_text))
         .with_state(srv);
 
     let addr = format!("0.0.0.0:{port}");
@@ -50,7 +48,6 @@ async fn handle_ping() -> StatusCode {
     StatusCode::OK
 }
 
-// Another device is requesting to send us files.
 async fn handle_request(
     State(srv): State<Srv>,
     Json(req): Json<TransferRequest>,
@@ -81,7 +78,6 @@ async fn handle_request(
     StatusCode::OK
 }
 
-// Receiver accepted our outgoing transfer. Signal the waiting upload task.
 async fn handle_accept(
     Path(tid): Path<String>,
     State(srv): State<Srv>,
@@ -96,7 +92,6 @@ async fn handle_accept(
     }
 }
 
-// Receiver declined our outgoing transfer.
 async fn handle_decline(
     Path(tid): Path<String>,
     State(srv): State<Srv>,
@@ -115,8 +110,6 @@ async fn handle_decline(
     StatusCode::OK
 }
 
-// Receive a file chunk from the sender.
-// Path params: tid = transfer ID, fi = file index, ci = chunk index.
 async fn handle_upload(
     Path((tid, fi, ci)): Path<(String, usize, usize)>,
     State(srv): State<Srv>,
@@ -134,13 +127,11 @@ async fn handle_upload(
         file_name
     };
 
-    // Verify chunk integrity
     if !expected_hash.is_empty() && !integrity::verify_chunk(&body, &expected_hash) {
         eprintln!("[Upload] Hash mismatch: transfer={tid} file={fi} chunk={ci}");
         return StatusCode::BAD_REQUEST;
     }
 
-    // Write chunk to a temp file. Chunk 0 creates/truncates; subsequent chunks append.
     let temp_dir = std::env::temp_dir().join("the-rift-incoming");
     if tokio::fs::create_dir_all(&temp_dir).await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR;
@@ -174,7 +165,6 @@ async fn handle_upload(
         }
     }
 
-    // Emit progress
     let bytes_done = ((ci + 1) as u64 * CHUNK_SIZE as u64).min(file_size);
     let _ = srv.app.emit(
         "transfer_progress",
@@ -189,7 +179,6 @@ async fn handle_upload(
         }),
     );
 
-    // Last chunk of this file: move to Downloads
     if ci + 1 == total_chunks {
         let downloads = dirs::download_dir().unwrap_or_else(|| {
             dirs::home_dir()
@@ -200,7 +189,6 @@ async fn handle_upload(
         let safe_name = sanitize(&file_name);
         let dest = unique_path(&downloads, &safe_name);
 
-        // Try rename first (fast, same filesystem). Fall back to copy.
         if tokio::fs::rename(&temp_path, &dest).await.is_err() {
             if tokio::fs::copy(&temp_path, &dest).await.is_err() {
                 eprintln!("[Upload] Could not save file to {:?}", dest);
@@ -209,7 +197,6 @@ async fn handle_upload(
             let _ = tokio::fs::remove_file(&temp_path).await;
         }
 
-        // Last file in the transfer: emit complete
         if fi + 1 == total_files {
             let _ = srv.app.emit(
                 "transfer_complete",
@@ -220,6 +207,51 @@ async fn handle_upload(
             );
         }
     }
+
+    StatusCode::OK
+}
+
+/// Receive a raw text payload from a peer.
+/// Emits `incoming_text` to the frontend immediately — no accept/decline flow,
+/// text is considered low-risk enough to auto-deliver (like AirDrop text).
+async fn handle_text(
+    Path(tid): Path<String>,
+    State(srv): State<Srv>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> StatusCode {
+    let text = match String::from_utf8(body.to_vec()) {
+        Ok(t) => t,
+        Err(_) => return StatusCode::BAD_REQUEST,
+    };
+
+    // Guard against empty payloads
+    if text.trim().is_empty() {
+        return StatusCode::BAD_REQUEST;
+    }
+
+    let sender_id   = header_str(&headers, "x-sender-id");
+    let sender_name = header_str(&headers, "x-sender-name");
+    let sender_ip   = header_str(&headers, "x-sender-ip");
+    let sender_port = header_parse::<u16>(&headers, "x-sender-port").unwrap_or(7474);
+    let sender_os   = header_str(&headers, "x-sender-os");
+
+    let _ = srv.app.emit(
+        "incoming_text",
+        &serde_json::json!({
+            "transferId": tid,
+            "text": text,
+            "senderDevice": {
+                "id": sender_id,
+                "name": if sender_name.is_empty() { "Unknown Device".to_string() } else { sender_name },
+                "os": if sender_os.is_empty() { "unknown".to_string() } else { sender_os },
+                "ip": sender_ip,
+                "port": sender_port,
+                "latencyMs": null,
+                "discoveredAt": 0,
+            },
+        }),
+    );
 
     StatusCode::OK
 }

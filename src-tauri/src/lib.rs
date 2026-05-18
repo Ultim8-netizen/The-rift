@@ -54,8 +54,6 @@ async fn start_discovery(
     Ok(())
 }
 
-/// Clear all known devices and kick off a fresh mDNS scan. The frontend
-/// listens for the `devices_cleared` event to wipe its local list.
 #[tauri::command]
 async fn rescan(
     app: tauri::AppHandle,
@@ -129,6 +127,39 @@ async fn send_files(
 }
 
 #[tauri::command]
+async fn send_text(
+    target_device_id: String,
+    text: String,
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    let target = {
+        let s = state.lock().await;
+        s.devices
+            .get(&target_device_id)
+            .cloned()
+            .ok_or_else(|| "Device not found".to_string())?
+    };
+
+    if text.trim().is_empty() {
+        return Err("Text is empty".to_string());
+    }
+
+    let transfer_id = uuid::Uuid::new_v4().to_string();
+    let state_clone = state.inner().clone();
+
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) =
+            transfer::send_text_to_device(transfer_id, target, text, state_clone, app).await
+        {
+            eprintln!("[SendText] Error: {e}");
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
 async fn accept_transfer(
     transfer_id: String,
     state: State<'_, SharedState>,
@@ -193,6 +224,7 @@ pub fn run() {
             start_discovery,
             rescan,
             send_files,
+            send_text,
             accept_transfer,
             decline_transfer,
         ])
@@ -201,7 +233,6 @@ pub fn run() {
             let state_clone = shared_state.clone();
 
             tauri::async_runtime::spawn(async move {
-                // Resolve device name
                 let name = hostname::get()
                     .ok()
                     .and_then(|h| h.into_string().ok())
@@ -216,12 +247,8 @@ pub fn run() {
                     })
                     .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
 
-                // Captive portal — forces OS to see "internet" on the local
-                // network, preventing WiFi disconnection. Needs admin/root for
-                // full effect; falls back gracefully.
                 let _ = network::captive::start_captive_portal(our_ip).await;
 
-                // TCP rift channel server — persistent PING/PONG keepalive
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -232,7 +259,6 @@ pub fn run() {
                     });
                 }
 
-                // Transfer server
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -243,7 +269,6 @@ pub fn run() {
                     });
                 }
 
-                // Heartbeat (3-failure tolerance)
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -257,8 +282,6 @@ pub fn run() {
 
             Ok(())
         })
-        // Clean up the hosts-file injection on every exit path —
-        // normal close, OS signal, or crash-initiated shutdown.
         .build(tauri::generate_context!())
         .expect("The Rift failed to start")
         .run(|_app, event| {
