@@ -45,9 +45,6 @@ Thumbs.db
 src-tauri/target/
 src-tauri/gen/
 
-# Rust
-Cargo.lock
-
 # Misc
 coverage/
 .temp/
