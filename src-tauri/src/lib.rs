@@ -4,7 +4,7 @@ mod state;
 mod transfer;
 
 use state::{new_shared_state, SharedState, StagedFile};
-use tauri::State;
+use tauri::{Emitter, Manager, State};
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -257,6 +257,13 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("The Rift failed to start");
+        // Clean up the hosts-file injection on every exit path —
+        // normal close, OS signal, or crash-initiated shutdown.
+        .build(tauri::generate_context!())
+        .expect("The Rift failed to start")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                tauri::async_runtime::block_on(network::captive::cleanup_hosts_file());
+            }
+        });
 }
