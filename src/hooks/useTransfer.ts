@@ -1,6 +1,6 @@
 import { useTauriEvent, useInvoke } from "./useTauri";
 import { useRiftStore } from "@/store/riftStore";
-import { ChunkProgress, IncomingRequest, IncomingText, Transfer } from "@/types";
+import { ChunkProgress, IncomingRequest, IncomingTextPayload, Transfer } from "@/types";
 
 // ── Event listeners — call ONCE in App.tsx only ───────────────────────────────
 export function useTransferEvents() {
@@ -61,7 +61,7 @@ export function useTransferEvents() {
   });
 
   // Text arrives silently — no accept/decline, just surface the dialog.
-  useTauriEvent<IncomingText>("incoming_text", (payload) => {
+  useTauriEvent<IncomingTextPayload>("incoming_text", (payload) => {
     setIncomingText(payload);
   });
 }

@@ -1,49 +1,54 @@
 import { useRiftStore } from "@/store/riftStore";
 
-const statusConfig = {
-  searching: {
-    label: "Searching for devices...",
-    color: "text-rift-warning",
-    dot: "bg-rift-warning animate-pulse",
-  },
-  connected: {
-    label: "Connected",
-    color: "text-rift-success",
-    dot: "bg-rift-success",
-  },
-  hotspot: {
-    label: "Hotspot Mode",
-    color: "text-rift-accent",
-    dot: "bg-rift-accent",
-  },
-  offline: {
-    label: "No Network",
-    color: "text-rift-error",
-    dot: "bg-rift-error",
-  },
+const STATUS_META = {
+  searching: { label: "Scanning",   dot: "bg-rift-warning animate-pulse", text: "text-rift-warning" },
+  connected: { label: "Connected",  dot: "bg-rift-success",               text: "text-rift-success" },
+  hotspot:   { label: "Hotspot",    dot: "bg-rift-accent animate-pulse",  text: "text-rift-accent"  },
+  offline:   { label: "Offline",    dot: "bg-rift-error",                 text: "text-rift-error"   },
 };
 
 export function StatusBar() {
-  const ownDeviceName = useRiftStore((s) => s.ownDeviceName);
-  const networkStatus = useRiftStore((s) => s.networkStatus);
-  const devicesCount = useRiftStore((s) => s.devices.length);
-  const cfg = statusConfig[networkStatus];
+  const ownDeviceName     = useRiftStore((s) => s.ownDeviceName);
+  const networkStatus     = useRiftStore((s) => s.networkStatus);
+  const devicesCount      = useRiftStore((s) => s.devices.length);
+  const setThemePickerOpen = useRiftStore((s) => s.setThemePickerOpen);
+  const themePickerOpen   = useRiftStore((s) => s.themePickerOpen);
+
+  const meta = STATUS_META[networkStatus];
 
   return (
-    <div className="h-9 border-t border-rift-border bg-rift-surface flex items-center justify-between px-4 text-xs text-rift-muted font-mono select-none">
+    <div className="relative z-10 h-10 glass border-t border-rift-border/40 flex items-center px-4 select-none">
+      {/* Left: status */}
       <div className="flex items-center gap-2">
-        <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
-        <span className={cfg.color}>{cfg.label}</span>
+        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${meta.dot}`} />
+        <span className={`text-[11px] font-mono ${meta.text}`}>{meta.label}</span>
       </div>
-      <div className="flex items-center gap-4">
-        <span>
-          {devicesCount} device{devicesCount !== 1 ? "s" : ""} in range
+
+      {/* Center: device name */}
+      <div className="flex-1 flex justify-center">
+        <span className="text-[11px] font-mono text-rift-muted/70 tracking-wide">
+          {ownDeviceName}
         </span>
-        <span className="text-rift-border">|</span>
-        <span className="text-rift-text">{ownDeviceName}</span>
-        <span className="text-rift-border">|</span>
-        <span className="text-rift-muted opacity-60">
-          abyssprotocol / the rift
+      </div>
+
+      {/* Right: device count + theme picker */}
+      <div className="flex items-center gap-3">
+        <span className="text-[11px] font-mono text-rift-muted">
+          {devicesCount} {devicesCount === 1 ? "device" : "devices"} in range
+        </span>
+        <span className="w-px h-3 bg-rift-border/60" />
+        <button
+          onClick={() => setThemePickerOpen(!themePickerOpen)}
+          className={`
+            text-[11px] font-mono tracking-widest transition-colors px-1 rounded
+            ${themePickerOpen ? "text-rift-accent" : "text-rift-muted hover:text-rift-text"}
+          `}
+          title="Change theme"
+        >
+          THEME
+        </button>
+        <span className="text-[11px] font-mono text-rift-muted/30 tracking-widest">
+          RIFT
         </span>
       </div>
     </div>

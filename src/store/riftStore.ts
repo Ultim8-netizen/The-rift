@@ -3,9 +3,10 @@ import {
   Device,
   Transfer,
   IncomingRequest,
-  IncomingText,
+  IncomingTextPayload,
   NetworkStatus,
   StagedFile,
+  ThemeId,
 } from "@/types";
 
 interface RiftStore {
@@ -13,6 +14,11 @@ interface RiftStore {
   networkStatus: NetworkStatus;
   setOwnDeviceName: (name: string) => void;
   setNetworkStatus: (status: NetworkStatus) => void;
+
+  theme: ThemeId;
+  setTheme: (id: ThemeId) => void;
+  themePickerOpen: boolean;
+  setThemePickerOpen: (open: boolean) => void;
 
   devices: Device[];
   selectedDevice: Device | null;
@@ -37,9 +43,8 @@ interface RiftStore {
   incomingRequest: IncomingRequest | null;
   setIncomingRequest: (req: IncomingRequest | null) => void;
 
-  /** Incoming text payload waiting to be dismissed by the user. */
-  incomingText: IncomingText | null;
-  setIncomingText: (payload: IncomingText | null) => void;
+  incomingText: IncomingTextPayload | null;
+  setIncomingText: (payload: IncomingTextPayload | null) => void;
 
   stagedFiles: StagedFile[];
   setStagedFiles: (files: StagedFile[]) => void;
@@ -55,6 +60,11 @@ export const useRiftStore = create<RiftStore>((set) => ({
   setOwnDeviceName: (name) => set({ ownDeviceName: name }),
   setNetworkStatus: (status) => set({ networkStatus: status }),
 
+  theme: "system",
+  setTheme: (id) => set({ theme: id }),
+  themePickerOpen: false,
+  setThemePickerOpen: (open) => set({ themePickerOpen: open }),
+
   devices: [],
   selectedDevice: null,
   addDevice: (device) =>
@@ -66,18 +76,11 @@ export const useRiftStore = create<RiftStore>((set) => ({
   removeDevice: (deviceId) =>
     set((s) => ({
       devices: s.devices.filter((d) => d.id !== deviceId),
-      selectedDevice:
-        s.selectedDevice?.id === deviceId ? null : s.selectedDevice,
-      devicePopup:
-        s.devicePopup?.id === deviceId ? null : s.devicePopup,
+      selectedDevice: s.selectedDevice?.id === deviceId ? null : s.selectedDevice,
+      devicePopup: s.devicePopup?.id === deviceId ? null : s.devicePopup,
     })),
   clearDevices: () =>
-    set({
-      devices: [],
-      selectedDevice: null,
-      riftedDevices: [],
-      devicePopup: null,
-    }),
+    set({ devices: [], selectedDevice: null, riftedDevices: [], devicePopup: null }),
   updateDeviceLatency: (deviceId, latencyMs) =>
     set((s) => ({
       devices: s.devices.map((d) =>
@@ -94,9 +97,7 @@ export const useRiftStore = create<RiftStore>((set) => ({
         : [...s.riftedDevices, id],
     })),
   removeRiftedDevice: (id) =>
-    set((s) => ({
-      riftedDevices: s.riftedDevices.filter((r) => r !== id),
-    })),
+    set((s) => ({ riftedDevices: s.riftedDevices.filter((r) => r !== id) })),
 
   devicePopup: null,
   setDevicePopup: (device) => set({ devicePopup: device }),
@@ -110,9 +111,7 @@ export const useRiftStore = create<RiftStore>((set) => ({
     })),
   updateTransfer: (id, updates) =>
     set((s) => ({
-      transfers: s.transfers.map((t) =>
-        t.id === id ? { ...t, ...updates } : t
-      ),
+      transfers: s.transfers.map((t) => (t.id === id ? { ...t, ...updates } : t)),
     })),
   removeTransfer: (id) =>
     set((s) => ({ transfers: s.transfers.filter((t) => t.id !== id) })),

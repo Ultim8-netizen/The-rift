@@ -1,3 +1,13 @@
+export type ThemeId =
+  | "system"
+  | "dark-black"
+  | "dark-blue"
+  | "dark-grey"
+  | "dark-purple"
+  | "light-pink"
+  | "light-lemon"
+  | "light-blue";
+
 export type TransferStatus =
   | "queued"
   | "connecting"
@@ -72,8 +82,7 @@ export interface IncomingRequest {
   totalBytes: number;
 }
 
-export interface IncomingText {
-  transferId: string;
+export interface IncomingTextPayload {
   text: string;
   senderDevice: Device;
 }
