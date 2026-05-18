@@ -1,0 +1,221 @@
+mod discovery;
+mod network;
+mod state;
+mod transfer;
+
+use state::{new_shared_state, SharedState, StagedFile};
+use tauri::State;
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppStatePayload {
+    own_device_name: String,
+    network_status: String,
+    devices_in_range: usize,
+}
+
+#[tauri::command]
+async fn get_app_state(state: State<'_, SharedState>) -> Result<AppStatePayload, String> {
+    let s = state.lock().await;
+    Ok(AppStatePayload {
+        own_device_name: s.own_device_name.clone(),
+        network_status: "searching".to_string(),
+        devices_in_range: s.devices.len(),
+    })
+}
+
+#[tauri::command]
+async fn get_file_metadata(paths: Vec<String>) -> Result<Vec<StagedFile>, String> {
+    let mut out = Vec::new();
+    for path in paths {
+        let p = std::path::Path::new(&path);
+        let name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        out.push(StagedFile {
+            name,
+            path,
+            size_bytes: size,
+        });
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+async fn start_discovery(
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    let s = state.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = discovery::start_discovery(s, app).await {
+            eprintln!("[Discovery] Error: {e}");
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+async fn send_files(
+    target_device_id: String,
+    file_paths: Vec<String>,
+    app: tauri::AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    let (target, _own_id) = {
+        let s = state.lock().await;
+        let t = s
+            .devices
+            .get(&target_device_id)
+            .cloned()
+            .ok_or_else(|| "Device not found".to_string())?;
+        (t, s.own_id.clone())
+    };
+
+    let files: Vec<state::FileEntry> = file_paths
+        .iter()
+        .map(|path| {
+            let p = std::path::Path::new(path);
+            let name = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("file")
+                .to_string();
+            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            state::FileEntry {
+                name,
+                path: path.clone(),
+                size_bytes: size,
+                mime_type: "application/octet-stream".to_string(),
+            }
+        })
+        .collect();
+
+    let transfer_id = uuid::Uuid::new_v4().to_string();
+    let state_clone = state.inner().clone();
+
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = transfer::send_files_to_device(
+            transfer_id,
+            target,
+            files,
+            state_clone,
+            app,
+        )
+        .await
+        {
+            eprintln!("[Send] Error: {e}");
+        }
+    });
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn accept_transfer(
+    transfer_id: String,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    let pending = state
+        .lock()
+        .await
+        .pending_transfers
+        .get(&transfer_id)
+        .cloned()
+        .ok_or_else(|| "Pending transfer not found".to_string())?;
+
+    let url = format!(
+        "http://{}:{}/accept/{}",
+        pending.sender_device.ip, pending.sender_device.port, transfer_id
+    );
+
+    reqwest::Client::new()
+        .post(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn decline_transfer(
+    transfer_id: String,
+    state: State<'_, SharedState>,
+) -> Result<(), String> {
+    let pending = state
+        .lock()
+        .await
+        .pending_transfers
+        .get(&transfer_id)
+        .cloned()
+        .ok_or_else(|| "Pending transfer not found".to_string())?;
+
+    let url = format!(
+        "http://{}:{}/decline/{}",
+        pending.sender_device.ip, pending.sender_device.port, transfer_id
+    );
+
+    reqwest::Client::new()
+        .post(&url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let shared_state = new_shared_state();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
+        .manage(shared_state.clone())
+        .invoke_handler(tauri::generate_handler![
+            get_app_state,
+            get_file_metadata,
+            start_discovery,
+            send_files,
+            accept_transfer,
+            decline_transfer,
+        ])
+        .setup(move |app| {
+            let app_handle = app.handle().clone();
+            let state_clone = shared_state.clone();
+
+            tauri::async_runtime::spawn(async move {
+                let name = hostname::get()
+                    .ok()
+                    .and_then(|h| h.into_string().ok())
+                    .unwrap_or_else(|| "Rift Device".to_string());
+
+                state_clone.lock().await.own_device_name = name;
+
+                let s = state_clone.clone();
+                let a = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = transfer::start_transfer_server(s, a).await {
+                        eprintln!("[Server] Fatal: {e}");
+                    }
+                });
+
+                let s = state_clone.clone();
+                let a = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = network::start_heartbeat(s, a).await {
+                        eprintln!("[Heartbeat] Fatal: {e}");
+                    }
+                });
+            });
+
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("The Rift failed to start");
+}
