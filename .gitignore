@@ -49,3 +49,6 @@ src-tauri/gen/
 coverage/
 .temp/
 tmp/
+
+#logo
+icon-source.png
