@@ -229,6 +229,20 @@ pub fn run() {
             decline_transfer,
         ])
         .setup(move |app| {
+            // ── Android: acquire WiFi + Multicast locks immediately ──────────
+            //
+            // Must happen here, on the main/setup thread, before any network
+            // tasks are spawned. The main thread is guaranteed to be attached
+            // to the JVM on Android. Doing this later (inside an async spawn)
+            // would work too, but here is safest and earliest.
+            #[cfg(target_os = "android")]
+            if let Err(e) = network::acquire_wifi_locks() {
+                // Non-fatal: log and continue. The rift-channel TCP pings will
+                // still keep traffic flowing; only mDNS discovery may be
+                // degraded if the MulticastLock fails.
+                eprintln!("[Setup] Android WiFi lock error: {e}");
+            }
+
             let app_handle = app.handle().clone();
             let state_clone = shared_state.clone();
 
@@ -247,6 +261,8 @@ pub fn run() {
                     })
                     .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
 
+                // start_captive_portal returns immediately on Android —
+                // no change needed at the call site.
                 let _ = network::captive::start_captive_portal(our_ip).await;
 
                 {

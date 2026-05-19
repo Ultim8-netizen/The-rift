@@ -1,26 +1,25 @@
-//! Forces the OS to keep the WiFi link alive by three mechanisms:
+//! Forces the OS to keep the WiFi link alive.
 //!
-//! 1. DNS responder on UDP :53 — answers ALL A-record queries with our IP.
-//!    Windows NCSI, macOS CNA, and Android/Chrome connectivity checkers do DNS
-//!    lookups first. Intercepting them prevents "No Internet" detection.
-//!    Requires admin / root. Falls back to hosts-file rewrite if port is taken.
+//! Desktop (Windows / macOS / Linux):
+//!   1. DNS responder on UDP :53 — answers ALL A-record queries with our IP.
+//!   2. HTTP captive portal on TCP :80 — serves NCSI / CNA check responses.
+//!   3. Hosts-file injection — rewrites NCSI hostnames → our IP.
+//!   4. WiFi power-save disable — platform-specific commands.
 //!
-//! 2. HTTP captive portal on TCP :80 — serves exact response bodies that
-//!    Windows, macOS, Android, and Linux expect from their connectivity URLs.
-//!    Requires admin / root. Silently skipped if unavailable.
-//!
-//! 3. Hosts-file injection — writes all known NCSI hostnames → our IP into
-//!    /etc/hosts (Linux / macOS) or the Windows hosts file. Works without root
-//!    on most systems if the app was launched with appropriate permissions.
-//!    Cleaned up on exit via `cleanup_hosts_file()`.
-//!
-//! 4. WiFi power-save disable — runs platform-specific commands (powercfg on
-//!    Windows, iw on Linux) to prevent the adapter from sleeping between the
-//!    TCP rift-channel PING bursts.
+//! Android:
+//!   All four mechanisms above require root or are unavailable on Android.
+//!   On Android, WiFi keepalive is handled entirely by:
+//!     • WifiLock(WIFI_MODE_FULL_LOW_LATENCY) — acquired in android_wifi.rs
+//!     • MulticastLock                         — acquired in android_wifi.rs
+//!     • TCP rift-channel PINGs every 2 s      — keeps radio active
+//!   This module returns immediately on Android.
 
 use std::net::Ipv4Addr;
+
+#[cfg(not(target_os = "android"))]
 use tokio::net::UdpSocket;
 
+#[cfg(not(target_os = "android"))]
 const NCSI_HOSTS: &[&str] = &[
     "msftconnecttest.com",
     "www.msftconnecttest.com",
@@ -35,42 +34,58 @@ const NCSI_HOSTS: &[&str] = &[
     "networkcheck.kde.org",
 ];
 
+#[cfg(not(target_os = "android"))]
 const HOSTS_MARKER: &str = "# THE RIFT - DO NOT EDIT BELOW";
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 pub async fn start_captive_portal(our_ip: Ipv4Addr) -> anyhow::Result<()> {
-    // 1. DNS on :53
-    match UdpSocket::bind("0.0.0.0:53").await {
-        Ok(sock) => {
-            eprintln!("[Captive] DNS responder on :53 — all NCSI queries → {our_ip}");
-            tokio::spawn(dns_loop(sock, our_ip));
-        }
-        Err(e) => {
-            eprintln!("[Captive] Port 53 unavailable ({e}); falling back to hosts file");
-            write_hosts_file(our_ip).await;
-        }
+    // Android: WiFi keepalive is handled by WifiLock + MulticastLock +
+    // the TCP rift-channel ping loop. Nothing to do here.
+    #[cfg(target_os = "android")]
+    {
+        let _ = our_ip;
+        eprintln!("[Captive] Android — skipped (WiFi locks handle keepalive)");
+        return Ok(());
     }
 
-    // 2. HTTP captive portal on :80
-    match tokio::net::TcpListener::bind("0.0.0.0:80").await {
-        Ok(listener) => {
-            eprintln!("[Captive] HTTP captive portal on :80");
-            tokio::spawn(http_captive_loop(listener));
+    #[cfg(not(target_os = "android"))]
+    {
+        // 1. DNS on :53
+        match UdpSocket::bind("0.0.0.0:53").await {
+            Ok(sock) => {
+                eprintln!("[Captive] DNS responder on :53 — all NCSI queries → {our_ip}");
+                tokio::spawn(dns_loop(sock, our_ip));
+            }
+            Err(e) => {
+                eprintln!("[Captive] Port 53 unavailable ({e}); falling back to hosts file");
+                write_hosts_file(our_ip).await;
+            }
         }
-        Err(e) => {
-            eprintln!("[Captive] Port 80 unavailable ({e}); NCSI HTTP checks may not be intercepted");
+
+        // 2. HTTP captive portal on :80
+        match tokio::net::TcpListener::bind("0.0.0.0:80").await {
+            Ok(listener) => {
+                eprintln!("[Captive] HTTP captive portal on :80");
+                tokio::spawn(http_captive_loop(listener));
+            }
+            Err(e) => {
+                eprintln!(
+                    "[Captive] Port 80 unavailable ({e}); NCSI HTTP checks may not be intercepted"
+                );
+            }
         }
+
+        // 3. WiFi power save
+        disable_wifi_power_save().await;
+
+        Ok(())
     }
-
-    // 3. WiFi power save
-    disable_wifi_power_save().await;
-
-    Ok(())
 }
 
 // ── DNS responder ─────────────────────────────────────────────────────────────
 
+#[cfg(not(target_os = "android"))]
 async fn dns_loop(socket: UdpSocket, ip: Ipv4Addr) {
     let mut buf = [0u8; 512];
     loop {
@@ -88,11 +103,11 @@ async fn dns_loop(socket: UdpSocket, ip: Ipv4Addr) {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn build_dns_response(query: &[u8], ip: Ipv4Addr) -> Option<Vec<u8>> {
     if query.len() < 12 {
         return None;
     }
-    // Must be a question (QR bit = 0)
     if query[2] & 0x80 != 0 {
         return None;
     }
@@ -101,7 +116,6 @@ fn build_dns_response(query: &[u8], ip: Ipv4Addr) -> Option<Vec<u8>> {
         return None;
     }
 
-    // Walk the question section to find QTYPE
     let mut off = 12usize;
     loop {
         if off >= query.len() {
@@ -124,27 +138,17 @@ fn build_dns_response(query: &[u8], ip: Ipv4Addr) -> Option<Vec<u8>> {
     let qtype = u16::from_be_bytes([query[off], query[off + 1]]);
 
     let mut r = Vec::with_capacity(query.len() + 20);
-    // Transaction ID
     r.extend_from_slice(&query[0..2]);
-    // Flags: QR=1 AA=1 RD=1 RA=1
     r.extend_from_slice(&[0x85, 0x80]);
-    // QDCOUNT
     r.extend_from_slice(&query[4..6]);
-    // ANCOUNT: 1 for A, 0 for everything else
     r.extend_from_slice(if qtype == 1 { &[0, 1] } else { &[0, 0] });
-    // NSCOUNT ARCOUNT
     r.extend_from_slice(&[0, 0, 0, 0]);
-    // Copy question section
     r.extend_from_slice(&query[12..]);
 
     if qtype == 1 {
-        // Answer: name pointer → 0x0C
         r.extend_from_slice(&[0xC0, 0x0C]);
-        // Type A, Class IN
         r.extend_from_slice(&[0, 1, 0, 1]);
-        // TTL 30 s
         r.extend_from_slice(&[0, 0, 0, 30]);
-        // RDLENGTH 4
         r.extend_from_slice(&[0, 4]);
         r.extend_from_slice(&ip.octets());
     }
@@ -154,6 +158,7 @@ fn build_dns_response(query: &[u8], ip: Ipv4Addr) -> Option<Vec<u8>> {
 
 // ── HTTP captive portal ───────────────────────────────────────────────────────
 
+#[cfg(not(target_os = "android"))]
 async fn http_captive_loop(listener: tokio::net::TcpListener) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -169,9 +174,7 @@ async fn http_captive_loop(listener: tokio::net::TcpListener) {
                 let first_line = req.lines().next().unwrap_or("");
 
                 let (status, ct, body): (&str, &str, &str) =
-                    if first_line.contains("connecttest.txt")
-                        || first_line.contains("ncsi.txt")
-                    {
+                    if first_line.contains("connecttest.txt") || first_line.contains("ncsi.txt") {
                         ("200 OK", "text/plain", "Microsoft Connect Test")
                     } else if first_line.contains("hotspot-detect")
                         || first_line.contains("success.html")
@@ -198,6 +201,7 @@ async fn http_captive_loop(listener: tokio::net::TcpListener) {
 
 // ── Hosts file ───────────────────────────────────────────────────────────────
 
+#[cfg(not(target_os = "android"))]
 fn hosts_path() -> &'static str {
     if cfg!(windows) {
         r"C:\Windows\System32\drivers\etc\hosts"
@@ -206,11 +210,10 @@ fn hosts_path() -> &'static str {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 async fn write_hosts_file(ip: Ipv4Addr) {
     let path = hosts_path();
     let current = tokio::fs::read_to_string(path).await.unwrap_or_default();
-
-    // Strip any previous Rift block
     let cleaned = strip_rift_block(&current);
 
     let mut new_content = cleaned;
@@ -223,37 +226,46 @@ async fn write_hosts_file(ip: Ipv4Addr) {
 
     match tokio::fs::write(path, &new_content).await {
         Ok(_) => eprintln!("[Captive] Hosts file updated → {ip}"),
-        Err(e) => eprintln!("[Captive] Cannot write hosts file: {e} (run as admin/root for this feature)"),
+        Err(e) => eprintln!(
+            "[Captive] Cannot write hosts file: {e} (run as admin/root for this feature)"
+        ),
     }
 }
 
 pub async fn cleanup_hosts_file() {
-    let path = hosts_path();
-    if let Ok(current) = tokio::fs::read_to_string(path).await {
-        let cleaned = strip_rift_block(&current);
-        let _ = tokio::fs::write(path, cleaned).await;
-        eprintln!("[Captive] Hosts file cleaned up");
+    // Android: nothing to clean up.
+    #[cfg(target_os = "android")]
+    {
+        return;
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let path = hosts_path();
+        if let Ok(current) = tokio::fs::read_to_string(path).await {
+            let cleaned = strip_rift_block(&current);
+            let _ = tokio::fs::write(path, cleaned).await;
+            eprintln!("[Captive] Hosts file cleaned up");
+        }
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn strip_rift_block(content: &str) -> String {
-    // Remove the marker line and everything after it that was injected by us,
-    // up to the first blank line or end of file.
     if let Some(pos) = content.find(HOSTS_MARKER) {
-        // Keep everything before the marker (trim trailing whitespace)
         content[..pos].trim_end().to_string() + "\n"
     } else {
         content.to_string()
     }
 }
 
-// ── WiFi power-save disable ───────────────────────────────────────────────────
+// ── WiFi power-save disable (desktop only) ────────────────────────────────────
 
+#[cfg(not(target_os = "android"))]
 async fn disable_wifi_power_save() {
     #[cfg(target_os = "windows")]
     {
         use tokio::process::Command;
-        // Wireless Adapter Settings > Power Saving Mode = Maximum Performance (0)
         let _ = Command::new("powercfg")
             .args([
                 "/setacvalueindex",
@@ -284,7 +296,6 @@ async fn disable_wifi_power_save() {
     #[cfg(target_os = "linux")]
     {
         use tokio::process::Command;
-        // Discover all WiFi interfaces via `iw dev`
         if let Ok(out) = Command::new("iw").arg("dev").output().await {
             let text = String::from_utf8_lossy(&out.stdout);
             for line in text.lines() {
@@ -295,7 +306,6 @@ async fn disable_wifi_power_save() {
                         .args(["dev", iface, "set", "power_save", "off"])
                         .output()
                         .await;
-                    // Also try iwconfig legacy
                     let _ = Command::new("iwconfig")
                         .args([iface, "power", "off"])
                         .output()
@@ -308,8 +318,6 @@ async fn disable_wifi_power_save() {
 
     #[cfg(target_os = "macos")]
     {
-        // macOS requires com.apple.wifi private framework or system preferences.
-        // We can prevent system sleep which indirectly helps adapter stay active.
         let _ = tokio::process::Command::new("caffeinate")
             .args(["-i", "-w", &std::process::id().to_string()])
             .spawn();

@@ -39,11 +39,14 @@
       "certificateThumbprint": null,
       "digestAlgorithm": "sha256",
       "timestampUrl": ""
+    },
+    "android": {
+      "minSdkVersion": 24
     }
   },
   "plugins": {
-  "fs": {
-    "requireLiteralLeadingDot": false
+    "fs": {
+      "requireLiteralLeadingDot": false
+    }
   }
-}
 }

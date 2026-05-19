@@ -180,11 +180,12 @@ async fn handle_upload(
     );
 
     if ci + 1 == total_chunks {
-        let downloads = dirs::download_dir().unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("Downloads")
-        });
+        let downloads = get_save_dir();
+
+        if tokio::fs::create_dir_all(&downloads).await.is_err() {
+            eprintln!("[Upload] Cannot create downloads dir: {:?}", downloads);
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
 
         let safe_name = sanitize(&file_name);
         let dest = unique_path(&downloads, &safe_name);
@@ -211,9 +212,6 @@ async fn handle_upload(
     StatusCode::OK
 }
 
-/// Receive a raw text payload from a peer.
-/// Emits `incoming_text` to the frontend immediately — no accept/decline flow,
-/// text is considered low-risk enough to auto-deliver (like AirDrop text).
 async fn handle_text(
     Path(tid): Path<String>,
     State(srv): State<Srv>,
@@ -225,16 +223,15 @@ async fn handle_text(
         Err(_) => return StatusCode::BAD_REQUEST,
     };
 
-    // Guard against empty payloads
     if text.trim().is_empty() {
         return StatusCode::BAD_REQUEST;
     }
 
-    let sender_id   = header_str(&headers, "x-sender-id");
+    let sender_id = header_str(&headers, "x-sender-id");
     let sender_name = header_str(&headers, "x-sender-name");
-    let sender_ip   = header_str(&headers, "x-sender-ip");
+    let sender_ip = header_str(&headers, "x-sender-ip");
     let sender_port = header_parse::<u16>(&headers, "x-sender-port").unwrap_or(7474);
-    let sender_os   = header_str(&headers, "x-sender-os");
+    let sender_os = header_str(&headers, "x-sender-os");
 
     let _ = srv.app.emit(
         "incoming_text",
@@ -255,6 +252,37 @@ async fn handle_text(
 
     StatusCode::OK
 }
+
+// ── Platform-conditional download directory ───────────────────────────────────
+
+/// Returns the directory where received files are saved.
+///
+/// Android: `/sdcard/Download` — the public Downloads folder visible in
+/// Files and other media apps. Requires `READ_EXTERNAL_STORAGE` /
+/// `WRITE_EXTERNAL_STORAGE` in the manifest (declared in AndroidManifest.xml).
+///
+/// Desktop: `dirs::download_dir()` as before.
+fn get_save_dir() -> PathBuf {
+    #[cfg(target_os = "android")]
+    {
+        // EXTERNAL_STORAGE is set by Android to the primary shared storage root
+        // (typically /sdcard or /storage/emulated/0).
+        std::env::var("EXTERNAL_STORAGE")
+            .map(|s| PathBuf::from(s).join("Download"))
+            .unwrap_or_else(|_| PathBuf::from("/sdcard/Download"))
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        dirs::download_dir().unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("Downloads")
+        })
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn header_str(h: &HeaderMap, key: &str) -> String {
     h.get(key)
