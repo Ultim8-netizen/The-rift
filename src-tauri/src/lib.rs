@@ -4,7 +4,7 @@ mod state;
 mod transfer;
 
 use state::{new_shared_state, SharedState, StagedFile};
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, State};
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]

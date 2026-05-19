@@ -92,7 +92,12 @@ pub fn acquire_wifi_locks() -> anyhow::Result<()> {
 }
 
 /// No-op on all non-Android targets. Compiled away entirely.
+/// `#[allow(dead_code)]` suppresses the unused-function warning on non-Android
+/// build targets (e.g. Windows/macOS desktop) where this stub is the active
+/// variant but nothing has called it yet. The Android path above is excluded
+/// from those compilations entirely by `#[cfg]`, so it never triggers the lint.
 #[cfg(not(target_os = "android"))]
+#[allow(dead_code)]
 pub fn acquire_wifi_locks() -> anyhow::Result<()> {
     Ok(())
 }
