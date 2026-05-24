@@ -67,12 +67,29 @@ async fn rescan(
     }
     let _ = app.emit("devices_cleared", &serde_json::Value::Null);
 
+    // Re-run mDNS discovery
     let s = state.inner().clone();
+    let a = app.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = discovery::start_discovery(s, app).await {
+        if let Err(e) = discovery::start_discovery(s, a).await {
             eprintln!("[Rescan] Discovery error: {e}");
         }
     });
+
+    // Re-run subnet scan (finds instances that don't re-announce immediately)
+    let s2 = state.inner().clone();
+    let a2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let our_ip = local_ip_address::local_ip()
+            .ok()
+            .and_then(|ip| match ip {
+                std::net::IpAddr::V4(v4) => Some(v4),
+                _ => None,
+            })
+            .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
+        network::run_subnet_scan(our_ip, s2, a2).await;
+    });
+
     Ok(())
 }
 
@@ -229,17 +246,8 @@ pub fn run() {
             decline_transfer,
         ])
         .setup(move |app| {
-            // ── Android: acquire WiFi + Multicast locks immediately ──────────
-            //
-            // Must happen here, on the main/setup thread, before any network
-            // tasks are spawned. The main thread is guaranteed to be attached
-            // to the JVM on Android. Doing this later (inside an async spawn)
-            // would work too, but here is safest and earliest.
             #[cfg(target_os = "android")]
             if let Err(e) = network::acquire_wifi_locks() {
-                // Non-fatal: log and continue. The rift-channel TCP pings will
-                // still keep traffic flowing; only mDNS discovery may be
-                // degraded if the MulticastLock fails.
                 eprintln!("[Setup] Android WiFi lock error: {e}");
             }
 
@@ -261,10 +269,9 @@ pub fn run() {
                     })
                     .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
 
-                // start_captive_portal returns immediately on Android —
-                // no change needed at the call site.
                 let _ = network::captive::start_captive_portal(our_ip).await;
 
+                // ── Channel server ────────────────────────────────────────────
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -275,6 +282,7 @@ pub fn run() {
                     });
                 }
 
+                // ── Transfer server (includes /hello, /ping) ──────────────────
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -285,6 +293,7 @@ pub fn run() {
                     });
                 }
 
+                // ── Heartbeat ─────────────────────────────────────────────────
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -292,6 +301,31 @@ pub fn run() {
                         if let Err(e) = network::start_heartbeat(s, a).await {
                             eprintln!("[Heartbeat] Fatal: {e}");
                         }
+                    });
+                }
+
+                // ── UDP broadcast discovery ───────────────────────────────────
+                // Second discovery path; works even when mDNS multicast is
+                // blocked by the OS firewall or router.
+                {
+                    let s = state_clone.clone();
+                    let a = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = network::start_broadcast_discovery(s, a).await {
+                            eprintln!("[Broadcast] Error: {e}");
+                        }
+                    });
+                }
+
+                // ── Subnet scan ───────────────────────────────────────────────
+                // Delayed 2 s so the transfer server is up (it exposes /hello).
+                // Finds pre-existing Rift instances mDNS hasn't propagated yet.
+                {
+                    let s = state_clone.clone();
+                    let a = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        network::run_subnet_scan(our_ip, s, a).await;
                     });
                 }
             });

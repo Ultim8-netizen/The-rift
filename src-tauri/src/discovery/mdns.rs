@@ -6,9 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
 const SERVICE_TYPE: &str = "_therift._tcp.local.";
-/// How often (in seconds) we force a re-registration so late-joining devices
-/// see our announcement without needing us to re-launch.
-const REANNOUNCE_SECS: u64 = 25;
+/// Reduced from 25 s to 10 s so late-joining devices hear us faster.
+const REANNOUNCE_SECS: u64 = 10;
 
 pub async fn start_discovery(state: SharedState, app: AppHandle) -> anyhow::Result<()> {
     let (own_id, own_name, own_port) = {
@@ -51,7 +50,6 @@ pub async fn start_discovery(state: SharedState, app: AppHandle) -> anyhow::Resu
                 Some(properties.clone()),
             ) {
                 Ok(info) => {
-                    // Unregister first in case we're re-registering
                     let fullname = format!("{own_id_clone}.{SERVICE_TYPE}");
                     let _ = mdns.unregister(&fullname);
                     if let Err(e) = mdns.register(info) {
@@ -84,7 +82,11 @@ pub async fn start_discovery(state: SharedState, app: AppHandle) -> anyhow::Resu
                     let peer_os = get_prop(&info, "os");
                     let peer_name = {
                         let n = get_prop(&info, "name");
-                        if n.is_empty() { "Unknown Device".to_string() } else { n }
+                        if n.is_empty() {
+                            "Unknown Device".to_string()
+                        } else {
+                            n
+                        }
                     };
 
                     let peer_ip = info
@@ -122,7 +124,6 @@ pub async fn start_discovery(state: SharedState, app: AppHandle) -> anyhow::Resu
 
                     let _ = app_clone.emit("device_discovered", &device);
 
-                    // Open TCP rift channel (the owner with smaller ID connects)
                     let s = state_clone.clone();
                     let a = app_clone.clone();
                     let pid = peer_id.clone();
@@ -134,22 +135,31 @@ pub async fn start_discovery(state: SharedState, app: AppHandle) -> anyhow::Resu
                 }
 
                 Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
+                    // ── KEY FIX ──────────────────────────────────────────────
+                    // Do NOT remove the device from state here.  mDNS emits
+                    // ServiceRemoved on any cache expiry, interface change, or
+                    // brief multicast hiccup — none of which means the device
+                    // is actually gone.  The heartbeat owns true eviction after
+                    // 30 s of confirmed HTTP + rift-channel failure.
+                    //
+                    // We do emit device_reconnecting so the UI shows an amber
+                    // dot, giving the user a heads-up without breaking anything.
                     let s = state_clone.clone();
                     let a = app_clone.clone();
                     rt.spawn(async move {
-                        let mut state = s.lock().await;
-                        let to_remove: Vec<String> = state
+                        let state = s.lock().await;
+                        let affected: Vec<String> = state
                             .devices
                             .keys()
                             .filter(|id| fullname.contains(id.as_str()))
                             .cloned()
                             .collect();
-                        for id in to_remove {
-                            state.devices.remove(&id);
-                            state.rifted_devices.remove(&id);
+                        drop(state);
+                        for id in affected {
+                            eprintln!("[mDNS] ServiceRemoved for {id} — not evicting, waiting for heartbeat");
                             let _ = a.emit(
-                                "device_lost",
-                                &serde_json::json!({ "id": id }),
+                                "device_reconnecting",
+                                &serde_json::json!({ "deviceId": id }),
                             );
                         }
                     });
@@ -171,7 +181,7 @@ pub async fn start_discovery(state: SharedState, app: AppHandle) -> anyhow::Resu
     Ok(())
 }
 
-fn get_prop(info: &ServiceInfo, key: &str) -> String {
+fn get_prop(info: &mdns_sd::ServiceInfo, key: &str) -> String {
     info.get_properties()
         .get(key)
         .map(|v| v.val_str().to_string())

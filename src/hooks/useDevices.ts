@@ -6,14 +6,16 @@ import { Device, AppState, NetworkStatus } from "@/types";
 export function useDeviceEvents() {
   const { call } = useInvoke();
 
-  const addDevice = useRiftStore((s) => s.addDevice);
-  const removeDevice = useRiftStore((s) => s.removeDevice);
-  const updateDeviceLatency = useRiftStore((s) => s.updateDeviceLatency);
-  const setOwnDeviceName = useRiftStore((s) => s.setOwnDeviceName);
-  const setNetworkStatus = useRiftStore((s) => s.setNetworkStatus);
-  const clearDevices = useRiftStore((s) => s.clearDevices);
-  const addRiftedDevice = useRiftStore((s) => s.addRiftedDevice);
-  const removeRiftedDevice = useRiftStore((s) => s.removeRiftedDevice);
+  const addDevice            = useRiftStore((s) => s.addDevice);
+  const removeDevice         = useRiftStore((s) => s.removeDevice);
+  const updateDeviceLatency  = useRiftStore((s) => s.updateDeviceLatency);
+  const setOwnDeviceName     = useRiftStore((s) => s.setOwnDeviceName);
+  const setNetworkStatus     = useRiftStore((s) => s.setNetworkStatus);
+  const clearDevices         = useRiftStore((s) => s.clearDevices);
+  const addRiftedDevice      = useRiftStore((s) => s.addRiftedDevice);
+  const removeRiftedDevice   = useRiftStore((s) => s.removeRiftedDevice);
+  const addReconnecting      = useRiftStore((s) => s.addReconnectingDevice);
+  const removeReconnecting   = useRiftStore((s) => s.removeReconnectingDevice);
 
   useEffect(() => {
     call<AppState>("get_app_state").then((state) => {
@@ -22,8 +24,6 @@ export function useDeviceEvents() {
     });
     call("start_discovery");
   }, [call, setOwnDeviceName, setNetworkStatus]);
-  // call   — stable: useCallback([], []) in useInvoke
-  // setOwnDeviceName / setNetworkStatus — stable: Zustand actions never change reference
 
   useTauriEvent<Device>("device_discovered", (device) => {
     addDevice(device);
@@ -34,10 +34,22 @@ export function useDeviceEvents() {
     removeDevice(id);
   });
 
+  useTauriEvent<{ deviceId: string }>("device_reconnecting", ({ deviceId }) => {
+    // Device lost contact but is still in state — just flag it visually.
+    addReconnecting(deviceId);
+  });
+
+  useTauriEvent<{ deviceId: string }>("device_recovered", ({ deviceId }) => {
+    // Heartbeat succeeded again after earlier failures.
+    removeReconnecting(deviceId);
+  });
+
   useTauriEvent<{ deviceId: string; latencyMs: number }>(
     "device_latency_update",
     ({ deviceId, latencyMs }) => {
       updateDeviceLatency(deviceId, latencyMs);
+      // A successful latency ping means the device is alive — clear reconnecting.
+      removeReconnecting(deviceId);
     }
   );
 
@@ -52,6 +64,8 @@ export function useDeviceEvents() {
 
   useTauriEvent<{ deviceId: string }>("device_channel_connected", ({ deviceId }) => {
     addRiftedDevice(deviceId);
+    // TCP rift channel is live → device is definitely reachable.
+    removeReconnecting(deviceId);
   });
 
   useTauriEvent<{ deviceId: string }>("device_channel_lost", ({ deviceId }) => {
@@ -59,5 +73,4 @@ export function useDeviceEvents() {
   });
 }
 
-// Kept for backward-compat import name used by App.tsx
 export { useDeviceEvents as useDevices };

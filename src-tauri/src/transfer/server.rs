@@ -29,12 +29,13 @@ pub async fn start_transfer_server(
     let srv = Srv { state, app };
 
     let router = Router::new()
-        .route("/ping", get(handle_ping))
-        .route("/request", post(handle_request))
-        .route("/accept/:tid", post(handle_accept))
-        .route("/decline/:tid", post(handle_decline))
+        .route("/ping",              get(handle_ping))
+        .route("/hello",             get(handle_hello))   // ← NEW: identity endpoint
+        .route("/request",           post(handle_request))
+        .route("/accept/:tid",       post(handle_accept))
+        .route("/decline/:tid",      post(handle_decline))
         .route("/upload/:tid/:fi/:ci", post(handle_upload))
-        .route("/text/:tid", post(handle_text))
+        .route("/text/:tid",         post(handle_text))
         .with_state(srv);
 
     let addr = format!("0.0.0.0:{port}");
@@ -46,6 +47,17 @@ pub async fn start_transfer_server(
 
 async fn handle_ping() -> StatusCode {
     StatusCode::OK
+}
+
+/// Returns this device's identity so subnet_scan can identify us without mDNS.
+async fn handle_hello(State(srv): State<Srv>) -> Json<serde_json::Value> {
+    let s = srv.state.lock().await;
+    Json(serde_json::json!({
+        "id":   s.own_id,
+        "name": s.own_device_name,
+        "os":   std::env::consts::OS,
+        "port": s.own_port,
+    }))
 }
 
 async fn handle_request(
@@ -117,10 +129,10 @@ async fn handle_upload(
     body: Bytes,
 ) -> StatusCode {
     let expected_hash = header_str(&headers, "x-chunk-hash");
-    let total_chunks = header_parse::<usize>(&headers, "x-total-chunks").unwrap_or(1);
-    let total_files = header_parse::<usize>(&headers, "x-total-files").unwrap_or(1);
-    let file_size = header_parse::<u64>(&headers, "x-file-size").unwrap_or(0);
-    let file_name = header_str(&headers, "x-file-name");
+    let total_chunks  = header_parse::<usize>(&headers, "x-total-chunks").unwrap_or(1);
+    let total_files   = header_parse::<usize>(&headers, "x-total-files").unwrap_or(1);
+    let file_size     = header_parse::<u64>(&headers, "x-file-size").unwrap_or(0);
+    let file_name     = header_str(&headers, "x-file-name");
     let file_name = if file_name.is_empty() {
         format!("rift_file_{fi}")
     } else {
@@ -227,11 +239,11 @@ async fn handle_text(
         return StatusCode::BAD_REQUEST;
     }
 
-    let sender_id = header_str(&headers, "x-sender-id");
+    let sender_id   = header_str(&headers, "x-sender-id");
     let sender_name = header_str(&headers, "x-sender-name");
-    let sender_ip = header_str(&headers, "x-sender-ip");
+    let sender_ip   = header_str(&headers, "x-sender-ip");
     let sender_port = header_parse::<u16>(&headers, "x-sender-port").unwrap_or(7474);
-    let sender_os = header_str(&headers, "x-sender-os");
+    let sender_os   = header_str(&headers, "x-sender-os");
 
     let _ = srv.app.emit(
         "incoming_text",
@@ -255,18 +267,9 @@ async fn handle_text(
 
 // ── Platform-conditional download directory ───────────────────────────────────
 
-/// Returns the directory where received files are saved.
-///
-/// Android: `/sdcard/Download` — the public Downloads folder visible in
-/// Files and other media apps. Requires `READ_EXTERNAL_STORAGE` /
-/// `WRITE_EXTERNAL_STORAGE` in the manifest (declared in AndroidManifest.xml).
-///
-/// Desktop: `dirs::download_dir()` as before.
 fn get_save_dir() -> PathBuf {
     #[cfg(target_os = "android")]
     {
-        // EXTERNAL_STORAGE is set by Android to the primary shared storage root
-        // (typically /sdcard or /storage/emulated/0).
         std::env::var("EXTERNAL_STORAGE")
             .map(|s| PathBuf::from(s).join("Download"))
             .unwrap_or_else(|_| PathBuf::from("/sdcard/Download"))

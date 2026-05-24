@@ -2,7 +2,11 @@ use crate::state::SharedState;
 use tauri::{AppHandle, Emitter};
 
 const HEARTBEAT_INTERVAL_SECS: u64 = 5;
-const EVICT_AFTER_FAILURES: u8 = 3; // 15 s of silence before eviction
+
+/// 6 consecutive failures = 30 s before eviction (was 3 = 15 s).
+/// If the rift channel is alive the failure counter is reset instead of
+/// incremented — TCP-level reachability overrides HTTP-level unavailability.
+const EVICT_AFTER_FAILURES: u8 = 6;
 
 pub async fn start_heartbeat(state: SharedState, app: AppHandle) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
@@ -19,20 +23,31 @@ pub async fn start_heartbeat(state: SharedState, app: AppHandle) -> anyhow::Resu
 
         for device in devices {
             let url = format!("http://{}:{}/ping", device.ip, device.port);
-            let sc = state.clone();
-            let ac = app.clone();
-            let cc = client.clone();
+            let sc  = state.clone();
+            let ac  = app.clone();
+            let cc  = client.clone();
 
             tokio::spawn(async move {
                 let start = std::time::Instant::now();
                 match cc.get(&url).send().await {
                     Ok(_) => {
                         let latency = start.elapsed().as_millis() as u64;
-                        // Success — reset failure counter
-                        {
+
+                        let was_failing = {
                             let mut s = sc.lock().await;
+                            let was = s.heartbeat_failures.contains_key(&device.id);
                             s.heartbeat_failures.remove(&device.id);
+                            was
+                        };
+
+                        if was_failing {
+                            // Device came back — tell frontend to clear reconnecting state.
+                            let _ = ac.emit(
+                                "device_recovered",
+                                &serde_json::json!({ "deviceId": device.id }),
+                            );
                         }
+
                         let _ = ac.emit(
                             "device_latency_update",
                             &serde_json::json!({
@@ -42,6 +57,20 @@ pub async fn start_heartbeat(state: SharedState, app: AppHandle) -> anyhow::Resu
                         );
                     }
                     Err(_) => {
+                        // If the TCP rift channel is actively exchanging PINGs/PONGs,
+                        // the device is reachable.  HTTP may fail because the server is
+                        // busy (large upload), firewall blocks port, or the HTTP stack
+                        // hiccuped.  Trust the rift channel over HTTP.
+                        let rifted = sc.lock().await.rifted_devices.contains(&device.id);
+                        if rifted {
+                            sc.lock().await.heartbeat_failures.remove(&device.id);
+                            eprintln!(
+                                "[Heartbeat] HTTP ping failed for {} but rift channel is live — skipping eviction",
+                                device.id
+                            );
+                            return;
+                        }
+
                         let failures = {
                             let mut s = sc.lock().await;
                             let count = s
@@ -56,6 +85,16 @@ pub async fn start_heartbeat(state: SharedState, app: AppHandle) -> anyhow::Resu
                             "[Heartbeat] {} unreachable ({}/{})",
                             device.id, failures, EVICT_AFTER_FAILURES
                         );
+
+                        // First failure — warn frontend without touching state.
+                        // The device card shows an amber dot so the user knows
+                        // something is wrong, but it stays selectable.
+                        if failures == 1 {
+                            let _ = ac.emit(
+                                "device_reconnecting",
+                                &serde_json::json!({ "deviceId": device.id }),
+                            );
+                        }
 
                         if failures >= EVICT_AFTER_FAILURES {
                             let mut s = sc.lock().await;

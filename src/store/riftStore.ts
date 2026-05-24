@@ -32,6 +32,11 @@ interface RiftStore {
   addRiftedDevice: (id: string) => void;
   removeRiftedDevice: (id: string) => void;
 
+  /** Devices that have lost contact but have not yet been evicted (30 s grace). */
+  reconnectingDevices: string[];
+  addReconnectingDevice: (id: string) => void;
+  removeReconnectingDevice: (id: string) => void;
+
   devicePopup: Device | null;
   setDevicePopup: (device: Device | null) => void;
 
@@ -67,26 +72,40 @@ export const useRiftStore = create<RiftStore>((set) => ({
 
   devices: [],
   selectedDevice: null,
+
   addDevice: (device) =>
     set((s) => ({
       devices: s.devices.some((d) => d.id === device.id)
         ? s.devices.map((d) => (d.id === device.id ? device : d))
         : [...s.devices, device],
+      // Device (re-)appeared — clear its reconnecting flag
+      reconnectingDevices: s.reconnectingDevices.filter((id) => id !== device.id),
     })),
+
   removeDevice: (deviceId) =>
     set((s) => ({
       devices: s.devices.filter((d) => d.id !== deviceId),
       selectedDevice: s.selectedDevice?.id === deviceId ? null : s.selectedDevice,
       devicePopup: s.devicePopup?.id === deviceId ? null : s.devicePopup,
+      reconnectingDevices: s.reconnectingDevices.filter((id) => id !== deviceId),
     })),
+
   clearDevices: () =>
-    set({ devices: [], selectedDevice: null, riftedDevices: [], devicePopup: null }),
+    set({
+      devices: [],
+      selectedDevice: null,
+      riftedDevices: [],
+      devicePopup: null,
+      reconnectingDevices: [],
+    }),
+
   updateDeviceLatency: (deviceId, latencyMs) =>
     set((s) => ({
       devices: s.devices.map((d) =>
         d.id === deviceId ? { ...d, latencyMs } : d
       ),
     })),
+
   selectDevice: (device) => set({ selectedDevice: device }),
 
   riftedDevices: [],
@@ -98,6 +117,18 @@ export const useRiftStore = create<RiftStore>((set) => ({
     })),
   removeRiftedDevice: (id) =>
     set((s) => ({ riftedDevices: s.riftedDevices.filter((r) => r !== id) })),
+
+  reconnectingDevices: [],
+  addReconnectingDevice: (id) =>
+    set((s) => ({
+      reconnectingDevices: s.reconnectingDevices.includes(id)
+        ? s.reconnectingDevices
+        : [...s.reconnectingDevices, id],
+    })),
+  removeReconnectingDevice: (id) =>
+    set((s) => ({
+      reconnectingDevices: s.reconnectingDevices.filter((r) => r !== id),
+    })),
 
   devicePopup: null,
   setDevicePopup: (device) => set({ devicePopup: device }),
