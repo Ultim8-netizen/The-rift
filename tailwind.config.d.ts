@@ -26,6 +26,7 @@ declare const _default: {
             borderRadius: {
                 "4xl": string;
                 "5xl": string;
+                "6xl": string;
             };
             animation: {
                 "pulse-slow": string;
@@ -39,6 +40,12 @@ declare const _default: {
                 "ring-breathe": string;
                 float: string;
                 radar: string;
+                "orb-drift-a": string;
+                "orb-drift-b": string;
+                "orb-drift-c": string;
+                "conic-spin": string;
+                "conic-spin-r": string;
+                "scale-in": string;
             };
             keyframes: {
                 fadeIn: {
@@ -47,6 +54,16 @@ declare const _default: {
                     };
                     "100%": {
                         opacity: string;
+                    };
+                };
+                scaleIn: {
+                    "0%": {
+                        opacity: string;
+                        transform: string;
+                    };
+                    "100%": {
+                        opacity: string;
+                        transform: string;
                     };
                 };
                 slideUp: {
@@ -105,13 +122,50 @@ declare const _default: {
                         opacity: string;
                     };
                 };
+                orbDriftA: {
+                    "0%": {
+                        transform: string;
+                    };
+                    "100%": {
+                        transform: string;
+                    };
+                };
+                orbDriftB: {
+                    "0%": {
+                        transform: string;
+                    };
+                    "100%": {
+                        transform: string;
+                    };
+                };
+                orbDriftC: {
+                    "0%": {
+                        transform: string;
+                    };
+                    "100%": {
+                        transform: string;
+                    };
+                };
+                conicSpin: {
+                    "0%": Record<string, string>;
+                    "100%": Record<string, string>;
+                };
+                conicSpinR: {
+                    "0%": Record<string, string>;
+                    "100%": Record<string, string>;
+                };
             };
             boxShadow: {
+                e1: string;
+                e2: string;
+                e3: string;
+                e4: string;
                 "glow-sm": string;
                 glow: string;
                 "glow-lg": string;
-                glass: string;
+                "glow-ring": string;
                 "glass-sm": string;
+                glass: string;
             };
         };
     };

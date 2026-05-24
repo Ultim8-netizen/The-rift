@@ -10,7 +10,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use tauri::{AppHandle, Emitter};
-use tokio::io::AsyncWriteExt;
 
 use crate::state::{
     PendingTransfer, SharedState, StreamReceiveState, TransferReceiveState, TransferRequest,

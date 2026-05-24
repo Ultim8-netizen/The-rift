@@ -9,13 +9,19 @@ const OS_LABEL: Record<string, string> = {
   unknown: "Unknown",
 };
 
-function Row({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+function InfoRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (
-    <div className="flex items-center justify-between py-1.5">
-      <span className="text-[10px] font-mono text-rift-muted/60 uppercase tracking-[0.14em]">
+    <div className="flex items-center justify-between py-2">
+      <span
+        className="text-[10px] font-mono uppercase tracking-[0.16em]"
+        style={{ color: "rgb(var(--rift-muted) / 0.55)" }}
+      >
         {label}
       </span>
-      <span className={`text-[11px] text-rift-text max-w-[55%] truncate text-right ${mono ? "font-mono" : ""}`}>
+      <span
+        className={`text-[11px] max-w-[55%] truncate text-right ${mono ? "font-mono" : ""}`}
+        style={{ color: "rgb(var(--rift-text))" }}
+      >
         {value}
       </span>
     </div>
@@ -23,12 +29,12 @@ function Row({ label, value, mono }: { label: string; value: string; mono?: bool
 }
 
 export function DevicePopup() {
-  const device        = useRiftStore((s) => s.devicePopup);
-  const setPopup      = useRiftStore((s) => s.setDevicePopup);
-  const selectDevice  = useRiftStore((s) => s.selectDevice);
+  const device         = useRiftStore((s) => s.devicePopup);
+  const setPopup       = useRiftStore((s) => s.setDevicePopup);
+  const selectDevice   = useRiftStore((s) => s.selectDevice);
   const selectedDevice = useRiftStore((s) => s.selectedDevice);
-  const riftedDevices = useRiftStore((s) => s.riftedDevices);
-  const overlayRef    = useRef<HTMLDivElement>(null);
+  const riftedDevices  = useRiftStore((s) => s.riftedDevices);
+  const overlayRef     = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!device) return;
@@ -52,14 +58,22 @@ export function DevicePopup() {
       ref={overlayRef}
       onClick={(e) => { if (e.target === overlayRef.current) setPopup(null); }}
       className="fixed inset-0 z-50 flex items-center justify-center animate-fade-in"
-      style={{ background: "rgb(0 0 0 / 0.55)", backdropFilter: "blur(14px)" }}
+      style={{ background: "rgb(0 0 0 / 0.6)", backdropFilter: "blur(20px)" }}
     >
-      <div className="glass-heavy rounded-3xl w-76 shadow-glass overflow-hidden animate-slide-up grad-border" style={{ width: "18rem" }}>
-        {/* Gradient accent line */}
+      <div
+        className="glass-heavy animate-scale-in overflow-hidden"
+        style={{ width: "300px", borderRadius: "28px" }}
+      >
+        {/* Accent top band */}
         <div
-          className="h-0.5"
           style={{
-            background: "linear-gradient(90deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)), transparent)",
+            height: "3px",
+            background: `linear-gradient(90deg, ${
+              isRifted
+                ? "rgb(var(--rift-success) / 0.8), rgb(var(--rift-accent) / 0.4)"
+                : "rgb(var(--rift-accent) / 0.8), rgb(var(--rift-accent2) / 0.4)"
+            }, transparent)`,
+            boxShadow: `0 0 24px ${isRifted ? "rgb(var(--rift-success) / 0.4)" : "rgb(var(--rift-glow) / 0.4)"}`,
           }}
         />
 
@@ -67,55 +81,69 @@ export function DevicePopup() {
           {/* Header */}
           <div className="flex items-start justify-between mb-4">
             <div>
-              <p className="text-[9px] font-mono text-rift-muted/55 uppercase tracking-[0.2em] mb-1">
-                Device Info
+              <p
+                className="text-[9px] font-mono uppercase tracking-[0.22em] mb-1"
+                style={{ color: "rgb(var(--rift-muted) / 0.5)" }}
+              >
+                Device
               </p>
               <p className="font-semibold text-rift-text text-sm">{device.name}</p>
             </div>
-            <span className="text-[9px] font-mono font-bold text-rift-accent/75 border border-rift-accent/20 bg-rift-accent/8 rounded-md px-2 py-1 leading-none mt-0.5">
-              {device.os.toUpperCase().slice(0, 3)}
-            </span>
+            {/* Connection status indicator */}
+            <div
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full"
+              style={{
+                background: isRifted
+                  ? "rgb(var(--rift-success) / 0.1)"
+                  : "rgb(var(--rift-warning) / 0.1)",
+                boxShadow: `0 0 0 1px ${isRifted ? "rgb(var(--rift-success) / 0.2)" : "rgb(var(--rift-warning) / 0.2)"}`,
+              }}
+            >
+              <span className={isRifted ? "status-dot-live" : "status-dot-wait"} />
+              <span
+                className="text-[9px] font-mono font-bold"
+                style={{
+                  color: isRifted ? "rgb(var(--rift-success))" : "rgb(var(--rift-warning))",
+                }}
+              >
+                {isRifted ? "LIVE" : "WAIT"}
+              </span>
+            </div>
           </div>
 
           {/* Details */}
           <div
-            className="rounded-xl px-3 py-1 mb-4 divide-y divide-rift-border/30"
-            style={{ background: "rgb(var(--rift-surface2) / 0.45)" }}
+            className="rounded-2xl px-3 py-1 mb-4"
+            style={{
+              background: "rgb(var(--rift-bg) / 0.4)",
+              boxShadow: "inset 0 2px 8px rgb(0 0 0 / 0.2)",
+            }}
           >
-            <Row label="OS" value={OS_LABEL[device.os] ?? device.os} />
-            <Row label="Address" value={`${device.ip}:${device.port}`} mono />
-            <Row label="Latency" value={device.latencyMs !== null ? `${device.latencyMs}ms` : "—"} mono />
-            <div className="flex items-center justify-between py-1.5">
-              <span className="text-[10px] font-mono text-rift-muted/60 uppercase tracking-[0.14em]">
-                Rift Channel
-              </span>
-              <span className={`flex items-center gap-1.5 text-[10px] font-mono ${isRifted ? "text-rift-success" : "text-rift-warning"}`}>
-                <span className={`w-1.5 h-1.5 rounded-full ${isRifted ? "bg-rift-success shadow-glow-sm" : "bg-rift-warning animate-pulse"}`} />
-                {isRifted ? "LIVE" : "WAIT"}
-              </span>
-            </div>
+            {/* Dividers via margin, not borders */}
+            <InfoRow label="OS" value={OS_LABEL[device.os] ?? device.os} />
+            <div style={{ height: "1px", background: "rgb(255 255 255 / 0.04)", margin: "0" }} />
+            <InfoRow label="Address" value={`${device.ip}:${device.port}`} mono />
+            <div style={{ height: "1px", background: "rgb(255 255 255 / 0.04)" }} />
+            <InfoRow
+              label="Latency"
+              value={device.latencyMs !== null ? `${device.latencyMs}ms` : "—"}
+              mono
+            />
           </div>
 
           {/* Actions */}
           <div className="flex flex-col gap-2">
             <button
               onClick={handleSelect}
-              className={`
-                w-full py-2.5 rounded-xl text-xs font-mono font-bold tracking-[0.1em] uppercase
-                transition-all duration-150
-                ${isSelected
-                  ? "border border-rift-error/30 text-rift-error/80 hover:bg-rift-error/8"
-                  : "text-rift-bg shadow-glow hover:shadow-glow-lg hover:scale-[1.01]"}
-              `}
-              style={!isSelected ? {
-                background: "linear-gradient(135deg, rgb(var(--rift-accent)), rgb(var(--rift-accent-dim)))",
-              } : {}}
+              className={`w-full py-2.5 ${isSelected ? "btn-danger" : "btn-accent"}`}
+              style={{ fontSize: "0.7rem" }}
             >
-              {isSelected ? "Deselect" : "Select for Transfer"}
+              {isSelected ? "Deselect Device" : "Select for Transfer"}
             </button>
             <button
               onClick={() => setPopup(null)}
-              className="w-full py-2 rounded-xl border border-rift-border/40 text-rift-muted/60 text-[10px] font-mono tracking-widest uppercase hover:border-rift-accent/25 hover:text-rift-muted transition-all duration-150"
+              className="w-full py-2 btn-ghost"
+              style={{ fontSize: "0.65rem" }}
             >
               Close
             </button>

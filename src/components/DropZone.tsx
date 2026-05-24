@@ -13,68 +13,171 @@ function fmt(bytes: number): string {
   return `${parseFloat((bytes / k ** i).toFixed(1))} ${s[i]}`;
 }
 
-function Portal({ dragging, hasFiles }: { dragging: boolean; hasFiles: boolean }) {
-  const ringBase = "absolute rounded-full border";
-  return (
-    <div className="relative w-56 h-56 flex items-center justify-center">
-      {/* Rings */}
-      <div
-        className={`${ringBase} inset-0 animate-spin-slowest transition-all duration-500 ${
-          dragging ? "border-rift-accent/50" : "border-rift-accent/12"
-        }`}
-      />
-      <div
-        className={`${ringBase} inset-5 animate-spin-slower transition-all duration-500 ${
-          dragging ? "border-rift-accent/40" : "border-rift-accent/18"
-        }`}
-        style={{ animationDirection: "reverse" }}
-      />
-      <div
-        className={`${ringBase} inset-10 animate-spin-slow transition-all duration-500 ${
-          dragging ? "border-rift-accent/60" : "border-rift-accent/28"
-        }`}
-      />
-      {/* Subtle ring breathe */}
-      <div className="absolute inset-0 rounded-full border border-rift-accent/8 animate-ring-breathe" />
+function Portal({
+  dragging,
+  hasFiles,
+  isSending,
+}: {
+  dragging: boolean;
+  hasFiles: boolean;
+  isSending: boolean;
+}) {
+  const scale = dragging ? 1.08 : hasFiles ? 1.03 : 1;
+  const state = dragging ? "drop" : isSending ? "send" : hasFiles ? "ready" : "idle";
 
-      {/* Center disc */}
+  const orbGlow = {
+    idle:  "0 0 60px rgb(var(--rift-accent) / 0.12), 0 0 120px rgb(var(--rift-glow) / 0.06)",
+    ready: "0 0 80px rgb(var(--rift-accent) / 0.2), 0 0 160px rgb(var(--rift-glow) / 0.1)",
+    drop:  "0 0 100px rgb(var(--rift-accent) / 0.35), 0 0 200px rgb(var(--rift-glow) / 0.18)",
+    send:  "0 0 90px rgb(var(--rift-accent2) / 0.3), 0 0 180px rgb(var(--rift-accent2) / 0.12)",
+  }[state];
+
+  return (
+    <div
+      className="relative flex items-center justify-center"
+      style={{
+        width: "220px",
+        height: "220px",
+        transform: `scale(${scale})`,
+        transition: "transform 0.4s cubic-bezier(0.16, 1, 0.3, 1)",
+      }}
+    >
+      {/* Outer ambient glow orb */}
       <div
-        className={`
-          relative z-10 w-28 h-28 rounded-full glass-heavy flex flex-col items-center justify-center
-          transition-all duration-300
-          ${dragging
-            ? "scale-110 shadow-glow border-rift-accent/50"
-            : hasFiles
-            ? "scale-105 shadow-glow-sm border-rift-accent/30"
-            : "border-rift-border/50"}
-        `}
+        className="absolute inset-0 rounded-full"
         style={{
-          border: "1px solid",
+          background: `radial-gradient(ellipse at center,
+            rgb(var(--rift-accent) / ${dragging ? "0.08" : "0.04"}) 0%,
+            transparent 65%
+          )`,
+          boxShadow: orbGlow,
+          transition: "all 0.5s ease",
+        }}
+      />
+
+      {/* Ring 3 — outermost, slow */}
+      <div
+        className="absolute rounded-full animate-spin-slowest"
+        style={{
+          inset: "0px",
+          background: "transparent",
+          boxShadow: `0 0 0 1px rgb(var(--rift-accent) / ${dragging ? "0.22" : "0.1"}), 0 0 12px rgb(var(--rift-glow) / 0.08)`,
+          transition: "box-shadow 0.4s ease",
+        }}
+      />
+
+      {/* Ring 2 — mid, reverse */}
+      <div
+        className="absolute rounded-full animate-spin-slower"
+        style={{
+          inset: "20px",
+          background: "transparent",
+          boxShadow: `0 0 0 1px rgb(var(--rift-accent2) / ${dragging ? "0.3" : "0.12"}), 0 0 16px rgb(var(--rift-accent2) / 0.06)`,
+          animationDirection: "reverse",
+          transition: "box-shadow 0.4s ease",
+        }}
+      />
+
+      {/* Ring 1 — inner, medium speed */}
+      <div
+        className="absolute rounded-full animate-spin-slow"
+        style={{
+          inset: "40px",
+          background: "transparent",
+          boxShadow: `0 0 0 1.5px rgb(var(--rift-accent) / ${dragging ? "0.45" : "0.2"}), 0 0 20px rgb(var(--rift-glow) / 0.1)`,
+          transition: "box-shadow 0.4s ease",
+        }}
+      />
+
+      {/* Breathe ring */}
+      <div
+        className="absolute rounded-full animate-ring-breathe"
+        style={{
+          inset: "30px",
+          background: "transparent",
+          boxShadow: `0 0 0 1px rgb(var(--rift-accent) / 0.08), 0 0 30px rgb(var(--rift-glow) / 0.06)`,
+        }}
+      />
+
+      {/* Center orb */}
+      <div
+        className="relative rounded-full flex flex-col items-center justify-center"
+        style={{
+          width: "90px",
+          height: "90px",
+          background: dragging
+            ? `radial-gradient(circle at 35% 30%, rgb(var(--rift-accent) / 0.35) 0%, rgb(var(--rift-surface) / 0.95) 60%)`
+            : state === "send"
+            ? `radial-gradient(circle at 35% 30%, rgb(var(--rift-accent2) / 0.3) 0%, rgb(var(--rift-surface) / 0.95) 60%)`
+            : `radial-gradient(circle at 35% 30%, rgb(var(--rift-accent) / 0.2) 0%, rgb(var(--rift-surface) / 0.92) 60%)`,
+          boxShadow: `
+            0 8px 32px rgb(0 0 0 / 0.5),
+            0 0 0 1px rgb(var(--rift-accent) / ${dragging ? "0.4" : "0.18"}),
+            0 0 ${dragging ? "50" : "28"}px rgb(var(--rift-glow) / ${dragging ? "0.35" : "0.15"}),
+            inset 0 1px 0 rgb(255 255 255 / 0.1)
+          `,
+          backdropFilter: "blur(24px)",
+          transition: "all 0.35s cubic-bezier(0.16, 1, 0.3, 1)",
         }}
       >
         {dragging ? (
           <>
-            <span className="text-xl font-mono font-black text-gradient leading-none">↓</span>
-            <span className="text-[9px] font-mono text-rift-accent/80 mt-1 tracking-widest">DROP</span>
-          </>
-        ) : hasFiles ? (
-          <>
-            <span className="text-[11px] font-mono font-bold text-rift-accent tracking-wider">READY</span>
-          </>
-        ) : (
-          <>
             <span
-              className="text-lg font-mono font-black leading-none"
+              className="text-2xl font-mono font-black leading-none animate-float"
               style={{
-                background: "linear-gradient(135deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)))",
+                background: "linear-gradient(145deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)))",
                 WebkitBackgroundClip: "text",
                 WebkitTextFillColor: "transparent",
                 backgroundClip: "text",
               }}
             >
+              ↓
+            </span>
+            <span
+              className="text-[9px] font-mono font-bold mt-1 tracking-widest"
+              style={{ color: "rgb(var(--rift-accent) / 0.8)" }}
+            >
+              DROP
+            </span>
+          </>
+        ) : state === "send" ? (
+          <>
+            <span
+              className="text-[10px] font-mono font-bold tracking-widest"
+              style={{ color: "rgb(var(--rift-accent2))" }}
+            >
+              SENDING
+            </span>
+          </>
+        ) : state === "ready" ? (
+          <>
+            <span
+              className="text-[11px] font-mono font-bold tracking-[0.12em]"
+              style={{ color: "rgb(var(--rift-accent))" }}
+            >
+              READY
+            </span>
+          </>
+        ) : (
+          <>
+            <span
+              className="text-2xl font-mono font-black leading-none"
+              style={{
+                background: "linear-gradient(135deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)))",
+                WebkitBackgroundClip: "text",
+                WebkitTextFillColor: "transparent",
+                backgroundClip: "text",
+                filter: "drop-shadow(0 0 8px rgb(var(--rift-glow) / 0.4))",
+              }}
+            >
               ◈
             </span>
-            <span className="text-[9px] font-mono text-rift-muted/70 mt-1 tracking-widest">RIFT</span>
+            <span
+              className="text-[9px] font-mono mt-0.5 tracking-[0.2em]"
+              style={{ color: "rgb(var(--rift-muted) / 0.6)" }}
+            >
+              RIFT
+            </span>
           </>
         )}
       </div>
@@ -129,63 +232,102 @@ export function DropZone() {
   }
 
   return (
-    <div className="flex-1 flex flex-col items-center justify-center gap-5 p-8 select-none">
+    <div className="flex-1 flex flex-col items-center justify-center gap-6 px-8 py-6 select-none overflow-hidden">
       {/* Wordmark */}
-      <div className="text-center mb-2">
+      <div className="text-center">
         <h1
-          className="text-4xl font-black tracking-[-0.04em] font-mono leading-none"
+          className="font-black tracking-[-0.04em] font-mono leading-none"
           style={{
+            fontSize: "clamp(2rem, 4vw, 3rem)",
             background: "linear-gradient(125deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)))",
             WebkitBackgroundClip: "text",
             WebkitTextFillColor: "transparent",
             backgroundClip: "text",
+            filter: "drop-shadow(0 0 24px rgb(var(--rift-glow) / 0.3))",
           }}
         >
           THE RIFT
         </h1>
-        <p className="text-[9px] font-mono tracking-[0.32em] text-rift-muted/55 uppercase mt-1">
+        <p
+          className="text-[9px] font-mono tracking-[0.35em] uppercase mt-1"
+          style={{ color: "rgb(var(--rift-muted) / 0.45)" }}
+        >
           by abyssprotocol
         </p>
       </div>
 
       {/* Portal */}
-      <Portal dragging={isDragging} hasFiles={stagedFiles.length > 0} />
+      <Portal dragging={isDragging} hasFiles={stagedFiles.length > 0} isSending={isSending} />
 
-      {/* File info */}
+      {/* File info / drop prompt */}
       {stagedFiles.length === 0 ? (
         <div className="text-center flex flex-col items-center gap-2">
-          <p className="text-xs text-rift-muted/70">
+          <p
+            className="text-xs"
+            style={{ color: "rgb(var(--rift-muted) / 0.65)" }}
+          >
             Drop files anywhere — or{" "}
             <button
               onClick={browse}
-              className="text-rift-accent hover:text-rift-accent/80 underline-offset-2 hover:underline font-mono text-xs transition-colors"
+              className="font-mono text-xs transition-colors"
+              style={{ color: "rgb(var(--rift-accent))" }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.color = "rgb(var(--rift-accent2))";
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.color = "rgb(var(--rift-accent))";
+              }}
             >
               browse
             </button>
           </p>
-          <p className="text-[10px] font-mono text-rift-muted/40 tracking-wide">
+          <p
+            className="text-[10px] font-mono tracking-wide"
+            style={{ color: "rgb(var(--rift-muted) / 0.35)" }}
+          >
             Any type · Any size
           </p>
         </div>
       ) : (
-        <div className="glass-card rounded-2xl p-4 w-full max-w-xs animate-slide-up">
+        <div
+          className="rounded-2xl p-4 w-full max-w-xs animate-slide-up"
+          style={{
+            background: "rgb(var(--rift-surface2) / 0.5)",
+            backdropFilter: "blur(20px)",
+            boxShadow: "0 2px 12px rgb(0 0 0 / 0.25), 0 0 0 1px rgb(255 255 255 / 0.04), inset 0 1px 0 rgb(255 255 255 / 0.05)",
+          }}
+        >
           <div className="flex items-center justify-between mb-2">
             <div>
               <p className="text-xs font-semibold text-rift-text">
                 {stagedFiles.length} file{stagedFiles.length !== 1 ? "s" : ""} staged
               </p>
-              <p className="text-[10px] font-mono text-rift-muted mt-0.5">{fmt(totalBytes)}</p>
+              <p
+                className="text-[10px] font-mono mt-0.5"
+                style={{ color: "rgb(var(--rift-muted) / 0.7)" }}
+              >
+                {fmt(totalBytes)}
+              </p>
             </div>
             <button
               onClick={clearStaged}
-              className="text-[10px] font-mono text-rift-error/70 hover:text-rift-error border border-rift-error/20 hover:border-rift-error/40 rounded-lg px-2 py-1 transition-all"
+              className="text-[10px] font-mono px-2.5 py-1 rounded-full transition-all"
+              style={{
+                color: "rgb(var(--rift-error) / 0.75)",
+                background: "rgb(var(--rift-error) / 0.08)",
+                boxShadow: "0 0 0 1px rgb(var(--rift-error) / 0.15)",
+              }}
             >
               CLEAR
             </button>
           </div>
           <div className="max-h-20 overflow-y-auto">
             {stagedFiles.map((f, i) => (
-              <p key={i} className="text-[10px] font-mono text-rift-muted/70 truncate py-0.5">
+              <p
+                key={i}
+                className="text-[10px] font-mono truncate py-0.5"
+                style={{ color: "rgb(var(--rift-muted) / 0.65)" }}
+              >
                 {f.name}
               </p>
             ))}
@@ -193,14 +335,28 @@ export function DropZone() {
         </div>
       )}
 
-      {/* Target */}
+      {/* Target device indicator */}
       {selectedDevice ? (
-        <p className="text-[11px] font-mono text-rift-muted">
-          Sending to{" "}
-          <span className="text-rift-accent font-semibold">{selectedDevice.name}</span>
-        </p>
+        <div
+          className="flex items-center gap-2 px-3 py-1.5 rounded-full"
+          style={{
+            background: "rgb(var(--rift-accent) / 0.07)",
+            boxShadow: "0 0 0 1px rgb(var(--rift-accent) / 0.18)",
+          }}
+        >
+          <span className="status-dot-live" style={{ width: "5px", height: "5px" }} />
+          <span className="text-[11px] font-mono" style={{ color: "rgb(var(--rift-muted) / 0.8)" }}>
+            Sending to{" "}
+            <span style={{ color: "rgb(var(--rift-accent))", fontWeight: 600 }}>
+              {selectedDevice.name}
+            </span>
+          </span>
+        </div>
       ) : (
-        <p className="text-[11px] font-mono text-rift-muted/60">
+        <p
+          className="text-[11px] font-mono"
+          style={{ color: "rgb(var(--rift-muted) / 0.45)" }}
+        >
           Select a device from the left panel
         </p>
       )}
@@ -209,15 +365,14 @@ export function DropZone() {
       <button
         onClick={sendFiles}
         disabled={!canSend}
-        className={`
-          px-10 py-3 rounded-2xl font-mono text-sm font-bold tracking-[0.12em] uppercase
-          transition-all duration-200
-          ${canSend
-            ? "bg-rift-accent text-rift-bg shadow-glow hover:shadow-glow-lg hover:scale-105 animate-glow-pulse"
-            : "bg-rift-surface2 text-rift-muted/40 cursor-not-allowed border border-rift-border/30"}
-        `}
+        className="px-12 py-3.5 btn-accent text-sm animate-glow-pulse disabled:animate-none"
+        style={{
+          minWidth: "180px",
+          fontSize: "0.75rem",
+          letterSpacing: "0.14em",
+        }}
       >
-        {isSending ? "Sending…" : "Send"}
+        {isSending ? "Sending…" : "Send Through"}
       </button>
     </div>
   );

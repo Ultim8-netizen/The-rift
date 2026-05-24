@@ -12,20 +12,25 @@ function fmtEta(s: number | null): string {
   return s < 60 ? `${Math.ceil(s)}s` : `${Math.ceil(s / 60)}m`;
 }
 
-const STATUS_META: Record<string, { label: string; color: string }> = {
-  queued:      { label: "QUEUE",  color: "text-rift-muted" },
-  connecting:  { label: "CONN",   color: "text-rift-warning" },
-  transferring:{ label: "LIVE",   color: "text-rift-accent" },
-  paused:      { label: "PAUSE",  color: "text-rift-warning" },
-  complete:    { label: "DONE",   color: "text-rift-success" },
-  error:       { label: "ERR",    color: "text-rift-error" },
-  declined:    { label: "DENY",   color: "text-rift-error" },
+const STATUS_CONFIG: Record<string, {
+  label: string;
+  color: string;
+  bg: string;
+  glow?: string;
+}> = {
+  queued:       { label: "QUEUE",  color: "rgb(var(--rift-muted))",               bg: "rgb(var(--rift-muted) / 0.08)" },
+  connecting:   { label: "CONN",   color: "rgb(var(--rift-warning))",             bg: "rgb(var(--rift-warning) / 0.1)", glow: "0 0 12px rgb(var(--rift-warning) / 0.2)" },
+  transferring: { label: "LIVE",   color: "rgb(var(--rift-accent))",              bg: "rgb(var(--rift-accent) / 0.1)",  glow: "0 0 12px rgb(var(--rift-glow) / 0.25)" },
+  paused:       { label: "PAUSE",  color: "rgb(var(--rift-warning))",             bg: "rgb(var(--rift-warning) / 0.08)" },
+  complete:     { label: "DONE",   color: "rgb(var(--rift-success))",             bg: "rgb(var(--rift-success) / 0.1)", glow: "0 0 10px rgb(var(--rift-success) / 0.2)" },
+  error:        { label: "ERR",    color: "rgb(var(--rift-error))",               bg: "rgb(var(--rift-error) / 0.1)" },
+  declined:     { label: "DENY",   color: "rgb(var(--rift-error) / 0.7)",        bg: "rgb(var(--rift-error) / 0.07)" },
 };
 
 export function TransferItem({ transfer }: { transfer: Transfer }) {
   const progress =
     transfer.totalBytes > 0
-      ? (transfer.bytesTransferred / transfer.totalBytes) * 100
+      ? Math.min(100, (transfer.bytesTransferred / transfer.totalBytes) * 100)
       : 0;
 
   const label =
@@ -38,57 +43,94 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
       ? transfer.targetDevice?.name
       : transfer.senderDevice?.name;
 
-  const meta = STATUS_META[transfer.status] ?? STATUS_META.queued;
+  const sc = STATUS_CONFIG[transfer.status] ?? STATUS_CONFIG.queued;
   const isActive = transfer.status === "transferring" || transfer.status === "paused";
   const isDone   = transfer.status === "complete";
 
   return (
-    <div className={`glass-card rounded-xl p-3 animate-slide-up ${isDone ? "opacity-70" : ""}`}>
-      {/* Header row */}
+    <div
+      className="rounded-2xl p-3 animate-slide-up"
+      style={{
+        background: `rgb(var(--rift-surface2) / ${isDone ? "0.32" : "0.5"})`,
+        backdropFilter: "blur(20px)",
+        boxShadow: `
+          0 2px 10px rgb(0 0 0 / ${isDone ? "0.18" : "0.25"}),
+          0 0 0 1px rgb(255 255 255 / 0.04),
+          inset 0 1px 0 rgb(255 255 255 / 0.045)
+        `,
+        opacity: isDone ? 0.75 : 1,
+        transition: "opacity 0.3s ease",
+      }}
+    >
+      {/* Header */}
       <div className="flex items-start gap-2 mb-2">
         {/* Direction badge */}
         <span
-          className={`
-            flex-shrink-0 text-[9px] font-mono font-bold border rounded-md px-1.5 py-1 leading-none mt-0.5
-            ${transfer.direction === "outgoing"
-              ? "text-rift-accent/80 border-rift-accent/25 bg-rift-accent/8"
-              : "text-rift-accent2/80 border-rift-accent2/25 bg-rift-accent2/8"}
-          `}
+          className="flex-shrink-0 text-[9px] font-mono font-bold rounded-lg px-1.5 py-1 leading-none mt-0.5"
+          style={{
+            color: transfer.direction === "outgoing"
+              ? "rgb(var(--rift-accent) / 0.85)"
+              : "rgb(var(--rift-accent2) / 0.85)",
+            background: transfer.direction === "outgoing"
+              ? "rgb(var(--rift-accent) / 0.1)"
+              : "rgb(var(--rift-accent2) / 0.1)",
+            boxShadow: transfer.direction === "outgoing"
+              ? "0 0 0 1px rgb(var(--rift-accent) / 0.2)"
+              : "0 0 0 1px rgb(var(--rift-accent2) / 0.2)",
+          }}
         >
           {transfer.direction === "outgoing" ? "TX" : "RX"}
         </span>
 
-        {/* File name + peer */}
+        {/* Name + peer */}
         <div className="flex-1 min-w-0">
-          <p className="text-[11px] text-rift-text font-medium truncate leading-snug">{label}</p>
-          <p className="text-[10px] font-mono text-rift-muted/65 mt-0.5 truncate">
+          <p
+            className="text-[11px] font-medium truncate leading-tight"
+            style={{ color: "rgb(var(--rift-text))" }}
+          >
+            {label}
+          </p>
+          <p
+            className="text-[10px] font-mono mt-0.5 truncate"
+            style={{ color: "rgb(var(--rift-muted) / 0.6)" }}
+          >
             {peer ?? "Unknown"} · {fmt(transfer.totalBytes)}
           </p>
         </div>
 
-        {/* Status pill */}
-        <span className={`text-[9px] font-mono font-bold flex-shrink-0 ${meta.color}`}>
-          {meta.label}
+        {/* Status badge */}
+        <span
+          className="text-[9px] font-mono font-bold rounded-full px-2 py-0.5 flex-shrink-0"
+          style={{
+            color: sc.color,
+            background: sc.bg,
+            boxShadow: sc.glow ?? "none",
+          }}
+        >
+          {sc.label}
         </span>
       </div>
 
-      {/* Progress */}
+      {/* Progress bar */}
       {isActive && (
         <div className="mt-2">
-          <div className="w-full h-1 rounded-full overflow-hidden" style={{ background: "rgb(var(--rift-border) / 0.5)" }}>
+          <div className="progress-bar-track w-full h-1">
             <div
-              className="h-full rounded-full transition-all duration-300"
-              style={{
-                width: `${progress}%`,
-                background: "linear-gradient(90deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)))",
-              }}
+              className="progress-bar-fill"
+              style={{ width: `${progress}%` }}
             />
           </div>
-          <div className="flex justify-between mt-1">
-            <span className="text-[9px] font-mono text-rift-muted/60">
+          <div className="flex justify-between mt-1.5">
+            <span
+              className="text-[9px] font-mono"
+              style={{ color: "rgb(var(--rift-muted) / 0.55)" }}
+            >
               {fmt(transfer.bytesTransferred)} / {fmt(transfer.totalBytes)}
             </span>
-            <span className="text-[9px] font-mono text-rift-muted/60">
+            <span
+              className="text-[9px] font-mono"
+              style={{ color: "rgb(var(--rift-muted) / 0.55)" }}
+            >
               {fmt(transfer.speedBytesPerSec)}/s
               {transfer.etaSeconds !== null && ` · ${fmtEta(transfer.etaSeconds)}`}
             </span>
@@ -96,8 +138,12 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
         </div>
       )}
 
+      {/* Error message */}
       {transfer.status === "error" && transfer.errorMessage && (
-        <p className="text-[10px] font-mono text-rift-error/80 mt-1.5 leading-snug">
+        <p
+          className="text-[10px] font-mono mt-1.5 leading-snug"
+          style={{ color: "rgb(var(--rift-error) / 0.75)" }}
+        >
           {transfer.errorMessage}
         </p>
       )}
