@@ -25,6 +25,8 @@ export type NetworkStatus =
   | "hotspot"
   | "offline";
 
+export type HotspotRole = "host" | "guest" | "none";
+
 export interface StagedFile {
   name: string;
   path: string;
@@ -91,4 +93,14 @@ export interface AppState {
   ownDeviceName: string;
   networkStatus: NetworkStatus;
   devicesInRange: number;
+}
+
+/** Returned by the Rust hotspot commands. */
+export interface HotspotInfo {
+  ssid: string;
+  password: string;
+  /** Actual gateway IP read at runtime from the routing table. */
+  gatewayIp: string;
+  /** true = this device created the hotspot, false = this device joined one. */
+  isHost: boolean;
 }

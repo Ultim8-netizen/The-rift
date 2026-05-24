@@ -1,12 +1,14 @@
 import { create } from "zustand";
 import {
   Device,
-  Transfer,
+  HotspotInfo,
+  HotspotRole,
   IncomingRequest,
   IncomingTextPayload,
   NetworkStatus,
   StagedFile,
   ThemeId,
+  Transfer,
 } from "@/types";
 
 interface RiftStore {
@@ -32,7 +34,6 @@ interface RiftStore {
   addRiftedDevice: (id: string) => void;
   removeRiftedDevice: (id: string) => void;
 
-  /** Devices that have lost contact but have not yet been evicted (30 s grace). */
   reconnectingDevices: string[];
   addReconnectingDevice: (id: string) => void;
   removeReconnectingDevice: (id: string) => void;
@@ -57,6 +58,14 @@ interface RiftStore {
 
   isSending: boolean;
   setIsSending: (v: boolean) => void;
+
+  // ── Hotspot state ─────────────────────────────────────────────────────────
+  hotspotRole: HotspotRole;
+  hotspotInfo: HotspotInfo | null;
+  hotspotPanelOpen: boolean;
+  setHotspotRole: (role: HotspotRole) => void;
+  setHotspotInfo: (info: HotspotInfo | null) => void;
+  setHotspotPanelOpen: (open: boolean) => void;
 }
 
 export const useRiftStore = create<RiftStore>((set) => ({
@@ -78,7 +87,6 @@ export const useRiftStore = create<RiftStore>((set) => ({
       devices: s.devices.some((d) => d.id === device.id)
         ? s.devices.map((d) => (d.id === device.id ? device : d))
         : [...s.devices, device],
-      // Device (re-)appeared — clear its reconnecting flag
       reconnectingDevices: s.reconnectingDevices.filter((id) => id !== device.id),
     })),
 
@@ -159,4 +167,12 @@ export const useRiftStore = create<RiftStore>((set) => ({
 
   isSending: false,
   setIsSending: (v) => set({ isSending: v }),
+
+  // Hotspot
+  hotspotRole: "none",
+  hotspotInfo: null,
+  hotspotPanelOpen: false,
+  setHotspotRole: (role) => set({ hotspotRole: role }),
+  setHotspotInfo: (info) => set({ hotspotInfo: info }),
+  setHotspotPanelOpen: (open) => set({ hotspotPanelOpen: open }),
 }));

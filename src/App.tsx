@@ -8,6 +8,7 @@ import { AcceptDialog } from "@/components/AcceptDialog";
 import { DevicePopup } from "@/components/DevicePopup";
 import { StatusBar } from "@/components/StatusBar";
 import { ThemeSelector } from "@/components/ThemeSelector";
+import { HotspotPanel } from "@/components/HotspotPanel";
 
 export default function App() {
   useTheme();
@@ -42,6 +43,7 @@ export default function App() {
       <AcceptDialog />
       <DevicePopup />
       <ThemeSelector />
+      <HotspotPanel />
     </div>
   );
 }

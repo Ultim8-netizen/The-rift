@@ -3,7 +3,7 @@ mod network;
 mod state;
 mod transfer;
 
-use state::{new_shared_state, SharedState, StagedFile};
+use state::{new_shared_state, HotspotInfo, SharedState, StagedFile};
 use tauri::{Emitter, State};
 
 #[derive(serde::Serialize)]
@@ -67,7 +67,6 @@ async fn rescan(
     }
     let _ = app.emit("devices_cleared", &serde_json::Value::Null);
 
-    // Re-run mDNS discovery
     let s = state.inner().clone();
     let a = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -76,7 +75,6 @@ async fn rescan(
         }
     });
 
-    // Re-run subnet scan (finds instances that don't re-announce immediately)
     let s2 = state.inner().clone();
     let a2 = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -226,6 +224,51 @@ async fn decline_transfer(
     Ok(())
 }
 
+// ── Hotspot commands ──────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn start_hotspot(state: State<'_, SharedState>) -> Result<HotspotInfo, String> {
+    let ssid = format!("TheRift-{}", network::generate_ssid());
+    let password = network::generate_password();
+
+    match network::start_hotspot(&ssid, &password).await {
+        Ok(info) => {
+            state.lock().await.hotspot_info = Some(info.clone());
+            Ok(info)
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn stop_hotspot(state: State<'_, SharedState>) -> Result<(), String> {
+    network::stop_hotspot().await.map_err(|e| e.to_string())?;
+    state.lock().await.hotspot_info = None;
+    Ok(())
+}
+
+#[tauri::command]
+async fn connect_to_hotspot(
+    ssid: String,
+    password: String,
+    state: State<'_, SharedState>,
+) -> Result<HotspotInfo, String> {
+    match network::connect_to_hotspot(&ssid, &password).await {
+        Ok(info) => {
+            state.lock().await.hotspot_info = Some(info.clone());
+            Ok(info)
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn get_hotspot_info(state: State<'_, SharedState>) -> Result<Option<HotspotInfo>, String> {
+    Ok(state.lock().await.hotspot_info.clone())
+}
+
+// ── App entry point ───────────────────────────────────────────────────────────
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let shared_state = new_shared_state();
@@ -244,6 +287,10 @@ pub fn run() {
             send_text,
             accept_transfer,
             decline_transfer,
+            start_hotspot,
+            stop_hotspot,
+            connect_to_hotspot,
+            get_hotspot_info,
         ])
         .setup(move |app| {
             #[cfg(target_os = "android")]
@@ -271,7 +318,7 @@ pub fn run() {
 
                 let _ = network::captive::start_captive_portal(our_ip).await;
 
-                // ── Channel server ────────────────────────────────────────────
+                // Channel server
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -282,7 +329,7 @@ pub fn run() {
                     });
                 }
 
-                // ── Transfer server (includes /hello, /ping) ──────────────────
+                // Transfer server (HTTP: /hello, /ping, /request, /manifest, etc.)
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -293,7 +340,18 @@ pub fn run() {
                     });
                 }
 
-                // ── Heartbeat ─────────────────────────────────────────────────
+                // Stream server (raw TCP :7477 for dual-stream file transfer)
+                {
+                    let s = state_clone.clone();
+                    let a = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = transfer::start_stream_server(s, a).await {
+                            eprintln!("[StreamServer] Fatal: {e}");
+                        }
+                    });
+                }
+
+                // Heartbeat
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -304,9 +362,7 @@ pub fn run() {
                     });
                 }
 
-                // ── UDP broadcast discovery ───────────────────────────────────
-                // Second discovery path; works even when mDNS multicast is
-                // blocked by the OS firewall or router.
+                // UDP broadcast discovery
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -317,9 +373,7 @@ pub fn run() {
                     });
                 }
 
-                // ── Subnet scan ───────────────────────────────────────────────
-                // Delayed 2 s so the transfer server is up (it exposes /hello).
-                // Finds pre-existing Rift instances mDNS hasn't propagated yet.
+                // Subnet scan (delayed so transfer server is up first)
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();

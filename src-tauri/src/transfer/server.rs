@@ -5,14 +5,17 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncWriteExt;
 
-use crate::state::{PendingTransfer, SharedState, TransferRequest};
-use crate::transfer::integrity;
-
-pub const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MB
+use crate::state::{
+    PendingTransfer, SharedState, StreamReceiveState, TransferReceiveState, TransferRequest,
+};
+use crate::transfer::manifest::{ResumeManifest, TransferManifest};
 
 #[derive(Clone)]
 struct Srv {
@@ -29,13 +32,14 @@ pub async fn start_transfer_server(
     let srv = Srv { state, app };
 
     let router = Router::new()
-        .route("/ping",              get(handle_ping))
-        .route("/hello",             get(handle_hello))   // ← NEW: identity endpoint
-        .route("/request",           post(handle_request))
-        .route("/accept/:tid",       post(handle_accept))
-        .route("/decline/:tid",      post(handle_decline))
-        .route("/upload/:tid/:fi/:ci", post(handle_upload))
-        .route("/text/:tid",         post(handle_text))
+        .route("/ping",               get(handle_ping))
+        .route("/hello",              get(handle_hello))
+        .route("/request",            post(handle_request))
+        .route("/manifest",           post(handle_manifest))
+        .route("/resume/:tid",        get(handle_resume))
+        .route("/accept/:tid",        post(handle_accept))
+        .route("/decline/:tid",       post(handle_decline))
+        .route("/text/:tid",          post(handle_text))
         .with_state(srv);
 
     let addr = format!("0.0.0.0:{port}");
@@ -49,7 +53,6 @@ async fn handle_ping() -> StatusCode {
     StatusCode::OK
 }
 
-/// Returns this device's identity so subnet_scan can identify us without mDNS.
 async fn handle_hello(State(srv): State<Srv>) -> Json<serde_json::Value> {
     let s = srv.state.lock().await;
     Json(serde_json::json!({
@@ -70,7 +73,6 @@ async fn handle_request(
         files: req.files.clone(),
         total_bytes: req.total_bytes,
     };
-
     srv.state
         .lock()
         .await
@@ -86,8 +88,126 @@ async fn handle_request(
             "totalBytes": req.total_bytes,
         }),
     );
-
     StatusCode::OK
+}
+
+/// Receives the TransferManifest from the sender.
+/// Pre-allocates files on disk and returns a ResumeManifest.
+/// If a transfer with this ID already exists (resume case), returns the
+/// current completed-chunks state so the sender skips already-written chunks.
+async fn handle_manifest(
+    State(srv): State<Srv>,
+    Json(manifest): Json<TransferManifest>,
+) -> Result<Json<ResumeManifest>, StatusCode> {
+    let tid = manifest.transfer_id.clone();
+
+    // Check for existing state (resume)
+    {
+        let s = srv.state.lock().await;
+        let existing = s.active_stream_transfers.get(&tid).cloned();
+        drop(s);
+
+        if let Some(ts) = existing {
+            let mut completed_per_file = Vec::new();
+            for fs in &ts.files {
+                let locked = fs.completed_chunks.lock().await;
+                completed_per_file.push(locked.iter().cloned().collect::<Vec<_>>());
+            }
+            eprintln!("[Manifest] Resume for {tid}");
+            return Ok(Json(ResumeManifest { transfer_id: tid, completed_per_file }));
+        }
+    }
+
+    // Fresh transfer — pre-allocate files
+    let downloads = get_save_dir();
+    if tokio::fs::create_dir_all(&downloads).await.is_err() {
+        eprintln!("[Manifest] Cannot create downloads dir");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let mut file_states: Vec<Arc<StreamReceiveState>> = Vec::new();
+
+    for file_manifest in &manifest.files {
+        let safe_name = sanitize(&file_manifest.name);
+        let dest = unique_path(&downloads, &safe_name);
+
+        // Create and pre-allocate the file.
+        // set_len() reserves the space without writing zeros on NTFS (sparse);
+        // on FAT32/exFAT it writes zeros, which is still correct.
+        let file = match tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .open(&dest)
+            .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[Manifest] Cannot create {:?}: {e}", dest);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        };
+
+        if let Err(e) = file.set_len(file_manifest.total_bytes).await {
+            eprintln!("[Manifest] set_len({}) failed: {e}", file_manifest.total_bytes);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        eprintln!(
+            "[Manifest] Pre-allocated {:?} ({} bytes)",
+            dest, file_manifest.total_bytes
+        );
+
+        file_states.push(Arc::new(StreamReceiveState {
+            manifest: file_manifest.clone(),
+            completed_chunks: tokio::sync::Mutex::new(HashSet::new()),
+            dest_path: dest,
+            file_handle: tokio::sync::Mutex::new(file),
+        }));
+    }
+
+    let total_files = file_states.len();
+    let transfer_state = Arc::new(TransferReceiveState {
+        transfer_id: tid.clone(),
+        files: file_states,
+        total_files,
+        completed_files: AtomicUsize::new(0),
+    });
+
+    srv.state
+        .lock()
+        .await
+        .active_stream_transfers
+        .insert(tid.clone(), transfer_state);
+
+    eprintln!("[Manifest] Registered {tid} — {} files", manifest.files.len());
+
+    let completed_per_file = vec![vec![]; manifest.files.len()];
+    Ok(Json(ResumeManifest { transfer_id: tid, completed_per_file }))
+}
+
+/// Returns the current ResumeManifest for an active transfer.
+/// Used by the sender on reconnect to learn which chunks to skip.
+async fn handle_resume(
+    Path(tid): Path<String>,
+    State(srv): State<Srv>,
+) -> Result<Json<ResumeManifest>, StatusCode> {
+    let ts = {
+        let s = srv.state.lock().await;
+        s.active_stream_transfers.get(&tid).cloned()
+    };
+
+    match ts {
+        None => Err(StatusCode::NOT_FOUND),
+        Some(ts) => {
+            let mut completed_per_file = Vec::new();
+            for fs in &ts.files {
+                let locked = fs.completed_chunks.lock().await;
+                completed_per_file.push(locked.iter().cloned().collect::<Vec<_>>());
+            }
+            Ok(Json(ResumeManifest { transfer_id: tid, completed_per_file }))
+        }
+    }
 }
 
 async fn handle_accept(
@@ -122,108 +242,6 @@ async fn handle_decline(
     StatusCode::OK
 }
 
-async fn handle_upload(
-    Path((tid, fi, ci)): Path<(String, usize, usize)>,
-    State(srv): State<Srv>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> StatusCode {
-    let expected_hash = header_str(&headers, "x-chunk-hash");
-    let total_chunks  = header_parse::<usize>(&headers, "x-total-chunks").unwrap_or(1);
-    let total_files   = header_parse::<usize>(&headers, "x-total-files").unwrap_or(1);
-    let file_size     = header_parse::<u64>(&headers, "x-file-size").unwrap_or(0);
-    let file_name     = header_str(&headers, "x-file-name");
-    let file_name = if file_name.is_empty() {
-        format!("rift_file_{fi}")
-    } else {
-        file_name
-    };
-
-    if !expected_hash.is_empty() && !integrity::verify_chunk(&body, &expected_hash) {
-        eprintln!("[Upload] Hash mismatch: transfer={tid} file={fi} chunk={ci}");
-        return StatusCode::BAD_REQUEST;
-    }
-
-    let temp_dir = std::env::temp_dir().join("the-rift-incoming");
-    if tokio::fs::create_dir_all(&temp_dir).await.is_err() {
-        return StatusCode::INTERNAL_SERVER_ERROR;
-    }
-
-    let temp_path = temp_dir.join(format!("{tid}_{fi}.tmp"));
-    let open_result = if ci == 0 {
-        tokio::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&temp_path)
-            .await
-    } else {
-        tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&temp_path)
-            .await
-    };
-
-    match open_result {
-        Ok(mut f) => {
-            if f.write_all(&body).await.is_err() {
-                return StatusCode::INTERNAL_SERVER_ERROR;
-            }
-        }
-        Err(e) => {
-            eprintln!("[Upload] File open error: {e}");
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
-    }
-
-    let bytes_done = ((ci + 1) as u64 * CHUNK_SIZE as u64).min(file_size);
-    let _ = srv.app.emit(
-        "transfer_progress",
-        &serde_json::json!({
-            "transferId": tid,
-            "chunkIndex": ci,
-            "totalChunks": total_chunks,
-            "bytesTransferred": bytes_done,
-            "totalBytes": file_size,
-            "speedBytesPerSec": 0,
-            "etaSeconds": null,
-        }),
-    );
-
-    if ci + 1 == total_chunks {
-        let downloads = get_save_dir();
-
-        if tokio::fs::create_dir_all(&downloads).await.is_err() {
-            eprintln!("[Upload] Cannot create downloads dir: {:?}", downloads);
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
-
-        let safe_name = sanitize(&file_name);
-        let dest = unique_path(&downloads, &safe_name);
-
-        if tokio::fs::rename(&temp_path, &dest).await.is_err() {
-            if tokio::fs::copy(&temp_path, &dest).await.is_err() {
-                eprintln!("[Upload] Could not save file to {:?}", dest);
-                return StatusCode::INTERNAL_SERVER_ERROR;
-            }
-            let _ = tokio::fs::remove_file(&temp_path).await;
-        }
-
-        if fi + 1 == total_files {
-            let _ = srv.app.emit(
-                "transfer_complete",
-                &serde_json::json!({
-                    "transferId": tid,
-                    "savePath": dest.to_string_lossy(),
-                }),
-            );
-        }
-    }
-
-    StatusCode::OK
-}
-
 async fn handle_text(
     Path(tid): Path<String>,
     State(srv): State<Srv>,
@@ -234,7 +252,6 @@ async fn handle_text(
         Ok(t) => t,
         Err(_) => return StatusCode::BAD_REQUEST,
     };
-
     if text.trim().is_empty() {
         return StatusCode::BAD_REQUEST;
     }
@@ -251,21 +268,18 @@ async fn handle_text(
             "transferId": tid,
             "text": text,
             "senderDevice": {
-                "id": sender_id,
+                "id":   sender_id,
                 "name": if sender_name.is_empty() { "Unknown Device".to_string() } else { sender_name },
-                "os": if sender_os.is_empty() { "unknown".to_string() } else { sender_os },
-                "ip": sender_ip,
+                "os":   if sender_os.is_empty()   { "unknown".to_string()         } else { sender_os   },
+                "ip":   sender_ip,
                 "port": sender_port,
                 "latencyMs": null,
                 "discoveredAt": 0,
             },
         }),
     );
-
     StatusCode::OK
 }
-
-// ── Platform-conditional download directory ───────────────────────────────────
 
 fn get_save_dir() -> PathBuf {
     #[cfg(target_os = "android")]
@@ -274,7 +288,6 @@ fn get_save_dir() -> PathBuf {
             .map(|s| PathBuf::from(s).join("Download"))
             .unwrap_or_else(|_| PathBuf::from("/sdcard/Download"))
     }
-
     #[cfg(not(target_os = "android"))]
     {
         dirs::download_dir().unwrap_or_else(|| {
@@ -285,13 +298,8 @@ fn get_save_dir() -> PathBuf {
     }
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
 fn header_str(h: &HeaderMap, key: &str) -> String {
-    h.get(key)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string()
+    h.get(key).and_then(|v| v.to_str().ok()).unwrap_or("").to_string()
 }
 
 fn header_parse<T: std::str::FromStr>(h: &HeaderMap, key: &str) -> Option<T> {

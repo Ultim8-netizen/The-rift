@@ -1,9 +1,11 @@
-use crate::state::{Device, FileEntry, SharedState, TransferRequest};
-use crate::transfer::integrity;
+use crate::state::{Device, FileEntry, SharedState};
+use crate::transfer::manifest::{build_manifest, ResumeManifest, SenderDevice, TransferManifest};
+use crate::transfer::stream_client::send_dual_stream;
+use crate::transfer::server::CHUNK_SIZE; // kept for text; not used for file transfer
 use tauri::{AppHandle, Emitter};
-use tokio::io::AsyncReadExt;
 
-pub const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MB
+// CHUNK_SIZE re-exported so server.rs can use it — we keep it consistent.
+pub const CHUNK_SIZE: usize = crate::transfer::manifest::DEFAULT_CHUNK_SIZE;
 
 pub async fn send_files_to_device(
     transfer_id: String,
@@ -21,34 +23,38 @@ pub async fn send_files_to_device(
         .unwrap_or_else(|_| "127.0.0.1".parse().unwrap())
         .to_string();
 
-    let sender_device = Device {
-        id: own_id,
-        name: own_name,
+    // Build a Device struct for our own identity (used in the legacy /request call)
+    let sender_device_full = Device {
+        id: own_id.clone(),
+        name: own_name.clone(),
         os: std::env::consts::OS.to_string(),
-        ip: own_ip,
+        ip: own_ip.clone(),
         port: own_port,
         latency_ms: None,
         discovered_at: 0,
     };
 
     let total_bytes: u64 = files.iter().map(|f| f.size_bytes).sum();
-    let total_files = files.len();
 
-    let client = reqwest::Client::builder()
+    let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
+    // 1. POST /request so the receiver shows the accept dialog
     let req_url = format!("http://{}:{}/request", target.ip, target.port);
-    let req_body = TransferRequest {
+    let req_body = crate::state::TransferRequest {
         transfer_id: transfer_id.clone(),
-        sender_device: sender_device.clone(),
+        sender_device: sender_device_full.clone(),
         files: files.clone(),
         total_bytes,
     };
+    http.post(&req_url)
+        .json(&req_body)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Cannot reach target: {e}"))?;
 
-    client.post(&req_url).json(&req_body).send().await
-        .map_err(|e| anyhow::anyhow!("Failed to reach target: {e}"))?;
-
+    // Emit outgoing transfer started
     let _ = app.emit(
         "transfer_started",
         &serde_json::json!({
@@ -69,6 +75,7 @@ pub async fn send_files_to_device(
         }),
     );
 
+    // 2. Wait for receiver to accept or decline
     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
     state
         .lock()
@@ -76,15 +83,9 @@ pub async fn send_files_to_device(
         .transfer_notifiers
         .insert(transfer_id.clone(), tx);
 
-    let accepted = match tokio::time::timeout(
-        std::time::Duration::from_secs(60),
-        rx,
-    )
-    .await
-    {
+    let accepted = match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
         Ok(Ok(v)) => v,
-        Ok(Err(_)) => false,
-        Err(_) => {
+        _ => {
             state.lock().await.transfer_notifiers.remove(&transfer_id);
             false
         }
@@ -101,109 +102,55 @@ pub async fn send_files_to_device(
         return Ok(());
     }
 
-    let base_url = format!("http://{}:{}", target.ip, target.port);
-    let start = std::time::Instant::now();
-    let mut global_bytes_sent: u64 = 0;
+    // 3. Build manifest — single pass over all files computing BLAKE3 hashes
+    let sender_device_manifest = SenderDevice {
+        id: own_id.clone(),
+        name: own_name.clone(),
+        os: std::env::consts::OS.to_string(),
+        ip: own_ip.clone(),
+        port: own_port,
+    };
 
-    for (fi, file_entry) in files.iter().enumerate() {
-        upload_file(
-            &client,
-            &transfer_id,
-            fi,
-            total_files,
-            file_entry,
-            total_bytes,
-            &base_url,
-            &app,
-            &mut global_bytes_sent,
-            start,
-        )
-        .await?;
-    }
+    let file_tuples: Vec<(String, String, u64)> = files
+        .iter()
+        .map(|f| (f.name.clone(), f.path.clone(), f.size_bytes))
+        .collect();
 
+    eprintln!("[Client] Building manifest for {transfer_id} ({} files)", files.len());
+    let manifest = build_manifest(
+        transfer_id.clone(),
+        sender_device_manifest,
+        &file_tuples,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Manifest build failed: {e}"))?;
+
+    // 4. POST manifest to receiver; get back ResumeManifest (empty on fresh transfer)
+    let manifest_url = format!("http://{}:{}/manifest", target.ip, target.port);
+    let resume: ResumeManifest = http
+        .post(&manifest_url)
+        .json(&manifest)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("POST /manifest failed: {e}"))?
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("Deserialize ResumeManifest failed: {e}"))?;
+
+    eprintln!("[Client] Manifest accepted by receiver — launching dual streams");
+
+    // 5. Launch dual-stream transfer
+    let file_paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+
+    send_dual_stream(&manifest, &resume, &target, &file_paths, &app)
+        .await
+        .map_err(|e| anyhow::anyhow!("Dual-stream send failed: {e}"))?;
+
+    eprintln!("[Client] Transfer {transfer_id} send phase complete");
     Ok(())
 }
 
-async fn upload_file(
-    client: &reqwest::Client,
-    transfer_id: &str,
-    fi: usize,
-    total_files: usize,
-    entry: &FileEntry,
-    total_bytes: u64,
-    base_url: &str,
-    app: &AppHandle,
-    global_bytes_sent: &mut u64,
-    start: std::time::Instant,
-) -> anyhow::Result<()> {
-    let mut file = tokio::fs::File::open(&entry.path).await
-        .map_err(|e| anyhow::anyhow!("Cannot open {}: {e}", entry.path))?;
-
-    let file_size = entry.size_bytes;
-    let total_chunks = ((file_size as usize).saturating_add(CHUNK_SIZE - 1)) / CHUNK_SIZE;
-    let total_chunks = total_chunks.max(1);
-
-    for ci in 0..total_chunks {
-        let mut buf = vec![0u8; CHUNK_SIZE];
-        let bytes_read = file.read(&mut buf).await?;
-        if bytes_read == 0 {
-            break;
-        }
-        buf.truncate(bytes_read);
-
-        let hash = integrity::hash_chunk(&buf);
-        let url = format!("{base_url}/upload/{transfer_id}/{fi}/{ci}");
-
-        let resp = client
-            .post(&url)
-            .header("x-chunk-hash", &hash)
-            .header("x-total-chunks", total_chunks.to_string())
-            .header("x-file-size", file_size.to_string())
-            .header("x-file-name", &entry.name)
-            .header("x-total-files", total_files.to_string())
-            .body(buf)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("Chunk send failed: {e}"))?;
-
-        if !resp.status().is_success() {
-            anyhow::bail!("Chunk rejected: HTTP {}", resp.status());
-        }
-
-        *global_bytes_sent += bytes_read as u64;
-
-        let elapsed = start.elapsed().as_secs_f64();
-        let speed = if elapsed > 0.0 {
-            (*global_bytes_sent as f64 / elapsed) as u64
-        } else {
-            0
-        };
-        let remaining = total_bytes.saturating_sub(*global_bytes_sent);
-        let eta = if speed > 0 {
-            Some(remaining / speed)
-        } else {
-            None
-        };
-
-        let _ = app.emit(
-            "transfer_progress",
-            &serde_json::json!({
-                "transferId": transfer_id,
-                "chunkIndex": ci,
-                "totalChunks": total_chunks,
-                "bytesTransferred": global_bytes_sent,
-                "totalBytes": total_bytes,
-                "speedBytesPerSec": speed,
-                "etaSeconds": eta,
-            }),
-        );
-    }
-
-    Ok(())
-}
-
-/// Send raw text to a peer device.
-/// The receiver emits an `incoming_text` event on their side.
+/// Send raw text to a peer device — unchanged from original implementation.
 pub async fn send_text_to_device(
     transfer_id: String,
     target: Device,
@@ -244,10 +191,7 @@ pub async fn send_text_to_device(
             "text_sent",
             &serde_json::json!({
                 "transferId": transfer_id,
-                "targetDevice": {
-                    "id": target.id,
-                    "name": target.name,
-                },
+                "targetDevice": { "id": target.id, "name": target.name },
                 "length": text.len(),
             }),
         );

@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
@@ -50,6 +52,40 @@ pub struct TransferRequest {
     pub total_bytes: u64,
 }
 
+/// Hotspot credential and connection state shared with the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HotspotInfo {
+    pub ssid: String,
+    pub password: String,
+    /// Actual gateway IP read at runtime — never hardcoded.
+    pub gateway_ip: String,
+    /// true = this device is hosting, false = this device joined.
+    pub is_host: bool,
+}
+
+/// Per-file receive state for an active dual-stream transfer.
+/// Not Serialize/Clone — only accessed internally behind Arc.
+pub struct StreamReceiveState {
+    pub manifest: crate::transfer::manifest::FileManifest,
+    /// Chunk IDs that have been written and verified.
+    pub completed_chunks: Mutex<HashSet<usize>>,
+    /// Absolute path to the pre-allocated destination file.
+    pub dest_path: PathBuf,
+    /// File handle used for seek+write operations.
+    /// Mutex serializes concurrent writes from stream 0 and stream 1.
+    pub file_handle: Mutex<tokio::fs::File>,
+}
+
+/// Transfer-level receive state: groups all per-file states for one transfer.
+pub struct TransferReceiveState {
+    pub transfer_id: String,
+    pub files: Vec<Arc<StreamReceiveState>>,
+    pub total_files: usize,
+    /// Incremented atomically as each file completes full-file verification.
+    pub completed_files: AtomicUsize,
+}
+
 pub struct RiftState {
     pub own_id: String,
     pub own_device_name: String,
@@ -59,8 +95,12 @@ pub struct RiftState {
     pub transfer_notifiers: HashMap<String, tokio::sync::oneshot::Sender<bool>>,
     /// Device IDs with a live TCP rift channel.
     pub rifted_devices: HashSet<String>,
-    /// Consecutive heartbeat failures per device — evict at 3.
+    /// Consecutive heartbeat failures per device.
     pub heartbeat_failures: HashMap<String, u8>,
+    /// Active dual-stream transfers being received.
+    pub active_stream_transfers: HashMap<String, Arc<TransferReceiveState>>,
+    /// Current hotspot state (None = no hotspot active).
+    pub hotspot_info: Option<HotspotInfo>,
 }
 
 pub type SharedState = Arc<Mutex<RiftState>>;
@@ -75,5 +115,7 @@ pub fn new_shared_state() -> SharedState {
         transfer_notifiers: HashMap::new(),
         rifted_devices: HashSet::new(),
         heartbeat_failures: HashMap::new(),
+        active_stream_transfers: HashMap::new(),
+        hotspot_info: None,
     }))
 }
