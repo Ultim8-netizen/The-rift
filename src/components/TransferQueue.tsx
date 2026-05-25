@@ -7,6 +7,7 @@ export function TransferQueue() {
 
   return (
     <div
+      data-tour="transfer-queue"
       className="glass flex flex-col flex-shrink-0"
       style={{ width: "260px", borderRadius: "22px" }}
     >
@@ -14,7 +15,8 @@ export function TransferQueue() {
       <div
         className="flex items-center justify-between px-4 py-3.5 flex-shrink-0"
         style={{
-          background: "linear-gradient(180deg, rgb(var(--rift-surface) / 0.5) 0%, transparent 100%)",
+          background:
+            "linear-gradient(180deg, rgb(var(--rift-surface) / 0.5) 0%, transparent 100%)",
           borderRadius: "22px 22px 0 0",
         }}
       >
@@ -49,16 +51,15 @@ export function TransferQueue() {
         )}
       </div>
 
-      {/* Gradient separator */}
       <div
         className="mx-3 flex-shrink-0"
         style={{
           height: "1px",
-          background: "linear-gradient(90deg, transparent, rgb(var(--rift-accent) / 0.1), transparent)",
+          background:
+            "linear-gradient(90deg, transparent, rgb(var(--rift-accent) / 0.1), transparent)",
         }}
       />
 
-      {/* List */}
       <div className="flex-1 overflow-y-auto p-2.5 flex flex-col gap-2">
         {transfers.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full gap-3 py-8">
@@ -66,7 +67,8 @@ export function TransferQueue() {
               className="w-12 h-12 rounded-2xl flex items-center justify-center"
               style={{
                 background: "rgb(var(--rift-surface2) / 0.4)",
-                boxShadow: "0 0 0 1px rgb(255 255 255 / 0.04), inset 0 1px 0 rgb(255 255 255 / 0.04)",
+                boxShadow:
+                  "0 0 0 1px rgb(255 255 255 / 0.04), inset 0 1px 0 rgb(255 255 255 / 0.04)",
               }}
             >
               <span

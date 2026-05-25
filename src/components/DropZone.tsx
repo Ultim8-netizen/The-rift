@@ -114,7 +114,8 @@ function Portal({
             <span
               className="text-2xl font-mono font-black leading-none animate-float"
               style={{
-                background: "linear-gradient(145deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)))",
+                background:
+                  "linear-gradient(145deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)))",
                 WebkitBackgroundClip: "text",
                 WebkitTextFillColor: "transparent",
                 backgroundClip: "text",
@@ -148,7 +149,8 @@ function Portal({
             <span
               className="text-2xl font-mono font-black leading-none"
               style={{
-                background: "linear-gradient(135deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)))",
+                background:
+                  "linear-gradient(135deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)))",
                 WebkitBackgroundClip: "text",
                 WebkitTextFillColor: "transparent",
                 backgroundClip: "text",
@@ -171,7 +173,7 @@ function Portal({
 }
 
 export function DropZone() {
-  const [isDragging, setIsDragging]   = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const stagedFiles    = useRiftStore((s) => s.stagedFiles);
   const setStagedFiles = useRiftStore((s) => s.setStagedFiles);
   const clearStaged    = useRiftStore((s) => s.clearStagedFiles);
@@ -218,14 +220,18 @@ export function DropZone() {
   }
 
   return (
-    <div className="flex-1 flex flex-col items-center justify-center gap-6 px-8 py-6 select-none overflow-hidden">
+    <div
+      data-tour="drop-zone"
+      className="flex-1 flex flex-col items-center justify-center gap-6 px-8 py-6 select-none overflow-hidden"
+    >
       {/* Wordmark */}
       <div className="text-center">
         <h1
           className="font-black tracking-[-0.04em] font-mono leading-none"
           style={{
             fontSize: "clamp(2rem, 4vw, 3rem)",
-            background: "linear-gradient(125deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)))",
+            background:
+              "linear-gradient(125deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)))",
             WebkitBackgroundClip: "text",
             WebkitTextFillColor: "transparent",
             backgroundClip: "text",
@@ -243,25 +249,28 @@ export function DropZone() {
       </div>
 
       {/* Portal */}
-      <Portal dragging={isDragging} hasFiles={stagedFiles.length > 0} isSending={isSending} />
+      <Portal
+        dragging={isDragging}
+        hasFiles={stagedFiles.length > 0}
+        isSending={isSending}
+      />
 
       {/* File info / drop prompt */}
       {stagedFiles.length === 0 ? (
         <div className="text-center flex flex-col items-center gap-2">
-          <p
-            className="text-xs"
-            style={{ color: "rgb(var(--rift-muted) / 0.65)" }}
-          >
+          <p className="text-xs" style={{ color: "rgb(var(--rift-muted) / 0.65)" }}>
             Drop files anywhere — or{" "}
             <button
               onClick={browse}
               className="font-mono text-xs transition-colors"
               style={{ color: "rgb(var(--rift-accent))" }}
               onMouseEnter={(e) => {
-                (e.currentTarget as HTMLButtonElement).style.color = "rgb(var(--rift-accent2))";
+                (e.currentTarget as HTMLButtonElement).style.color =
+                  "rgb(var(--rift-accent2))";
               }}
               onMouseLeave={(e) => {
-                (e.currentTarget as HTMLButtonElement).style.color = "rgb(var(--rift-accent))";
+                (e.currentTarget as HTMLButtonElement).style.color =
+                  "rgb(var(--rift-accent))";
               }}
             >
               browse
@@ -280,7 +289,8 @@ export function DropZone() {
           style={{
             background: "rgb(var(--rift-surface2) / 0.5)",
             backdropFilter: "blur(20px)",
-            boxShadow: "0 2px 12px rgb(0 0 0 / 0.25), 0 0 0 1px rgb(255 255 255 / 0.04), inset 0 1px 0 rgb(255 255 255 / 0.05)",
+            boxShadow:
+              "0 2px 12px rgb(0 0 0 / 0.25), 0 0 0 1px rgb(255 255 255 / 0.04), inset 0 1px 0 rgb(255 255 255 / 0.05)",
           }}
         >
           <div className="flex items-center justify-between mb-2">
@@ -331,7 +341,10 @@ export function DropZone() {
           }}
         >
           <span className="status-dot-live" style={{ width: "5px", height: "5px" }} />
-          <span className="text-[11px] font-mono" style={{ color: "rgb(var(--rift-muted) / 0.8)" }}>
+          <span
+            className="text-[11px] font-mono"
+            style={{ color: "rgb(var(--rift-muted) / 0.8)" }}
+          >
             Sending to{" "}
             <span style={{ color: "rgb(var(--rift-accent))", fontWeight: 600 }}>
               {selectedDevice.name}
@@ -347,23 +360,20 @@ export function DropZone() {
         </p>
       )}
 
-      {/* Action row — Send Through + sticky note trigger */}
+      {/* Action row */}
       <div className="flex items-center gap-3">
         <button
+          data-tour="send-btn"
           onClick={sendFiles}
           disabled={!canSend}
           className="px-12 py-3.5 btn-accent text-sm animate-glow-pulse disabled:animate-none"
-          style={{
-            minWidth: "180px",
-            fontSize: "0.75rem",
-            letterSpacing: "0.14em",
-          }}
+          style={{ minWidth: "180px", fontSize: "0.75rem", letterSpacing: "0.14em" }}
         >
           {isSending ? "Sending…" : "Send Through"}
         </button>
 
-        {/* Sticky note / text trigger */}
         <button
+          data-tour="text-btn"
           onClick={() => setStickyNote(true)}
           title="Send text"
           className="flex items-center justify-center rounded-2xl transition-all duration-200"
@@ -371,7 +381,8 @@ export function DropZone() {
             width: "44px",
             height: "44px",
             background: "rgb(var(--rift-surface2) / 0.55)",
-            boxShadow: "0 0 0 1px rgb(255 255 255 / 0.06), 0 2px 8px rgb(0 0 0 / 0.25)",
+            boxShadow:
+              "0 0 0 1px rgb(255 255 255 / 0.06), 0 2px 8px rgb(0 0 0 / 0.25)",
             backdropFilter: "blur(12px)",
             flexShrink: 0,
           }}
@@ -384,7 +395,6 @@ export function DropZone() {
               "0 0 0 1px rgb(255 255 255 / 0.06), 0 2px 8px rgb(0 0 0 / 0.25)";
           }}
         >
-          {/* Mini sticky-note SVG icon */}
           <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
             <polygon
               points="2,2 13,2 16,5 16,16 2,16"

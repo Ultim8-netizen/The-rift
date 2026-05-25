@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useDevices } from "@/hooks/useDevices";
 import { useTransferEvents } from "@/hooks/useTransfer";
 import { useTheme } from "@/hooks/useTheme";
@@ -11,11 +12,25 @@ import { ThemeSelector } from "@/components/ThemeSelector";
 import { HotspotPanel } from "@/components/HotspotPanel";
 import { TextTransferPanel } from "@/components/TextTransferPanel";
 import { IncomingTextDialog } from "@/components/IncomingTextDialog";
+import { TourOverlay, TOUR_SEEN_KEY } from "@/components/TourOverlay";
+import { HelpPage } from "@/components/HelpPage";
+import { useRiftStore } from "@/store/riftStore";
 
 export default function App() {
   useTheme();
   useDevices();
   useTransferEvents();
+
+  // First-launch tour: fire after the layout has settled so data-tour
+  // elements are in the DOM and getBoundingClientRect returns real values.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (!localStorage.getItem(TOUR_SEEN_KEY)) {
+        useRiftStore.getState().startTour();
+      }
+    }, 650);
+    return () => clearTimeout(t);
+  }, []);
 
   return (
     <div
@@ -85,6 +100,10 @@ export default function App() {
       <HotspotPanel />
       <TextTransferPanel />
       <IncomingTextDialog />
+      <HelpPage />
+
+      {/* Tour renders above everything at z-200 */}
+      <TourOverlay />
     </div>
   );
 }

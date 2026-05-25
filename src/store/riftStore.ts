@@ -62,13 +62,24 @@ interface RiftStore {
   stickyNoteOpen: boolean;
   setStickyNoteOpen: (open: boolean) => void;
 
-  // ── Hotspot state ─────────────────────────────────────────────────────────
   hotspotRole: HotspotRole;
   hotspotInfo: HotspotInfo | null;
   hotspotPanelOpen: boolean;
   setHotspotRole: (role: HotspotRole) => void;
   setHotspotInfo: (info: HotspotInfo | null) => void;
   setHotspotPanelOpen: (open: boolean) => void;
+
+  // ── Tour ────────────────────────────────────────────────────────────────────
+  tourActive: boolean;
+  tourStep: number;
+  startTour: () => void;
+  advanceTour: () => void;
+  retreatTour: () => void;
+  endTour: () => void;
+
+  // ── Help page ────────────────────────────────────────────────────────────────
+  helpPageOpen: boolean;
+  setHelpPageOpen: (open: boolean) => void;
 }
 
 export const useRiftStore = create<RiftStore>((set) => ({
@@ -174,11 +185,22 @@ export const useRiftStore = create<RiftStore>((set) => ({
   stickyNoteOpen: false,
   setStickyNoteOpen: (open) => set({ stickyNoteOpen: open }),
 
-  // Hotspot
   hotspotRole: "none",
   hotspotInfo: null,
   hotspotPanelOpen: false,
   setHotspotRole: (role) => set({ hotspotRole: role }),
   setHotspotInfo: (info) => set({ hotspotInfo: info }),
   setHotspotPanelOpen: (open) => set({ hotspotPanelOpen: open }),
+
+  // Tour
+  tourActive: false,
+  tourStep: 0,
+  startTour: () => set({ tourActive: true, tourStep: 0 }),
+  advanceTour: () => set((s) => ({ tourStep: s.tourStep + 1 })),
+  retreatTour: () => set((s) => ({ tourStep: Math.max(0, s.tourStep - 1) })),
+  endTour: () => set({ tourActive: false }),
+
+  // Help page
+  helpPageOpen: false,
+  setHelpPageOpen: (open) => set({ helpPageOpen: open }),
 }));
