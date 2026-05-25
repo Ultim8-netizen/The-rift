@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+// src/components/DropZone.tsx
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { MouseEvent } from "react";
 import { useRiftStore } from "@/store/riftStore";
 import { useTransferActions } from "@/hooks/useTransfer";
 import { useInvoke } from "@/hooks/useTauri";
@@ -13,6 +15,52 @@ function fmt(bytes: number): string {
   return `${parseFloat((bytes / k ** i).toFixed(1))} ${s[i]}`;
 }
 
+// ── Portal geometry (module-level — computed once) ────────────────────────────
+const PCX = 150, PCY = 150, PSR = 52;
+
+function ellipsePerim(rx: number, ry: number): number {
+  const h = ((rx - ry) / (rx + ry)) ** 2;
+  return Math.PI * (rx + ry) * (1 + (3 * h) / (10 + Math.sqrt(4 - 3 * h)));
+}
+
+interface RingSpec {
+  rx: number; ry: number; rgb: string;
+  dur: string; delay: string; sw: number; gsw: number;
+}
+
+const BASE_RINGS: RingSpec[] = [
+  // Equatorial: very flat ellipse, tilted ~75° from face-on
+  { rx: 115, ry: 23,  rgb: "0,200,255",   dur: "5.5s",  delay: "0s",    sw: 1.2, gsw: 10 },
+  // Intermediate: ~45° inclination
+  { rx: 88,  ry: 56,  rgb: "130,75,255",  dur: "8.4s",  delay: "-2.6s", sw: 1.5, gsw: 12 },
+  // Steep: nearly vertical, appears nearly circular
+  { rx: 70,  ry: 67,  rgb: "170,210,255", dur: "11.2s", delay: "-5.8s", sw: 1.8, gsw: 14 },
+];
+
+const RINGS = BASE_RINGS.map((r, i) => {
+  const C    = Math.round(ellipsePerim(r.rx, r.ry));
+  const gLen = Math.round(C * 0.14);  // blurred halo segment length
+  const cLen = Math.round(C * 0.052); // bright core segment length
+  return { ...r, C, gLen, gGap: C - gLen, cLen, cGap: C - cLen, cls: `rfrt${i}` };
+});
+
+// Paths for upper (back) and lower (front) arcs — enables sphere to occlude correctly
+const bArc = (rx: number, ry: number) =>
+  `M ${PCX + rx},${PCY} A ${rx},${ry} 0 0,1 ${PCX - rx},${PCY}`;
+const fArc = (rx: number, ry: number) =>
+  `M ${PCX - rx},${PCY} A ${rx},${ry} 0 0,1 ${PCX + rx},${PCY}`;
+
+// CSS injected into the SVG <style> tag — static, never recalculated
+const RING_CSS =
+  RINGS.map((r) =>
+    `.${r.cls}{animation:${r.cls}kf ${r.dur} linear infinite ${r.delay}}` +
+    `@keyframes ${r.cls}kf{to{stroke-dashoffset:-${r.C}}}`
+  ).join("") +
+  `.rfrb{animation:rfbreath 4.5s ease-in-out infinite}` +
+  `@keyframes rfbreath{0%,100%{opacity:.5}50%{opacity:.9}}`;
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function Portal({
   dragging,
   hasFiles,
@@ -22,155 +70,276 @@ function Portal({
   hasFiles: boolean;
   isSending: boolean;
 }) {
-  const scale = dragging ? 1.08 : hasFiles ? 1.03 : 1;
-  const state = dragging ? "drop" : isSending ? "send" : hasFiles ? "ready" : "idle";
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [tilt, setTilt] = useState({ x: 0, y: 0 });
+  // spec.cx / spec.cy: 0–100 percentages driving both sphere fill and specular
+  const [spec, setSpec] = useState({ cx: 36, cy: 30 });
 
-  const orbGlow = {
-    idle:  "0 0 60px rgb(var(--rift-accent) / 0.12), 0 0 120px rgb(var(--rift-glow) / 0.06)",
-    ready: "0 0 80px rgb(var(--rift-accent) / 0.2), 0 0 160px rgb(var(--rift-glow) / 0.1)",
-    drop:  "0 0 100px rgb(var(--rift-accent) / 0.35), 0 0 200px rgb(var(--rift-glow) / 0.18)",
-    send:  "0 0 90px rgb(var(--rift-accent2) / 0.3), 0 0 180px rgb(var(--rift-accent2) / 0.12)",
-  }[state];
+  const state    = dragging ? "drop" : isSending ? "send" : hasFiles ? "ready" : "idle";
+  const baseRgb  = state === "send" ? "130,75,255" : "0,200,255";
+  const ambAlpha = dragging ? 0.22 : state === "ready" ? 0.12 : 0.065;
+  const isRest   = tilt.x === 0 && tilt.y === 0;
+
+  function onMouseMove(e: MouseEvent<HTMLDivElement>) {
+    const r = containerRef.current?.getBoundingClientRect();
+    if (!r) return;
+    const nx = (e.clientX - r.left - r.width  / 2) / (r.width  / 2); // -1..1
+    const ny = (e.clientY - r.top  - r.height / 2) / (r.height / 2); // -1..1
+    setTilt({ x: ny * -13, y: nx * 13 });
+    setSpec({ cx: 36 + nx * 13, cy: 30 + ny * 11 });
+  }
+
+  function onMouseLeave() {
+    setTilt({ x: 0, y: 0 });
+    setSpec({ cx: 36, cy: 30 });
+  }
+
+  const [sym, sub] =
+    dragging   ? ["↓",  "DROP"]
+    : isSending ? ["",   "SENDING"]
+    : hasFiles  ? ["",   "READY"]
+    :             ["◈",  "RIFT"];
 
   return (
     <div
-      className="relative flex items-center justify-center"
-      style={{
-        width: "220px",
-        height: "220px",
-        transform: `scale(${scale})`,
-        transition: "transform 0.4s cubic-bezier(0.16, 1, 0.3, 1)",
-      }}
+      ref={containerRef}
+      onMouseMove={onMouseMove}
+      onMouseLeave={onMouseLeave}
+      style={{ width: 260, height: 260, position: "relative", cursor: "default", flexShrink: 0 }}
     >
-      <div
-        className="absolute inset-0 rounded-full"
+      <svg
+        viewBox="0 0 300 300"
+        width={260}
+        height={260}
         style={{
-          background: `radial-gradient(ellipse at center,
-            rgb(var(--rift-accent) / ${dragging ? "0.08" : "0.04"}) 0%,
-            transparent 65%
-          )`,
-          boxShadow: orbGlow,
-          transition: "all 0.5s ease",
-        }}
-      />
-      <div
-        className="absolute rounded-full animate-spin-slowest"
-        style={{
-          inset: "0px",
-          background: "transparent",
-          boxShadow: `0 0 0 1px rgb(var(--rift-accent) / ${dragging ? "0.22" : "0.1"}), 0 0 12px rgb(var(--rift-glow) / 0.08)`,
-          transition: "box-shadow 0.4s ease",
-        }}
-      />
-      <div
-        className="absolute rounded-full animate-spin-slower"
-        style={{
-          inset: "20px",
-          background: "transparent",
-          boxShadow: `0 0 0 1px rgb(var(--rift-accent2) / ${dragging ? "0.3" : "0.12"}), 0 0 16px rgb(var(--rift-accent2) / 0.06)`,
-          animationDirection: "reverse",
-          transition: "box-shadow 0.4s ease",
-        }}
-      />
-      <div
-        className="absolute rounded-full animate-spin-slow"
-        style={{
-          inset: "40px",
-          background: "transparent",
-          boxShadow: `0 0 0 1.5px rgb(var(--rift-accent) / ${dragging ? "0.45" : "0.2"}), 0 0 20px rgb(var(--rift-glow) / 0.1)`,
-          transition: "box-shadow 0.4s ease",
-        }}
-      />
-      <div
-        className="absolute rounded-full animate-ring-breathe"
-        style={{
-          inset: "30px",
-          background: "transparent",
-          boxShadow: `0 0 0 1px rgb(var(--rift-accent) / 0.08), 0 0 30px rgb(var(--rift-glow) / 0.06)`,
-        }}
-      />
-      <div
-        className="relative rounded-full flex flex-col items-center justify-center"
-        style={{
-          width: "90px",
-          height: "90px",
-          background: dragging
-            ? `radial-gradient(circle at 35% 30%, rgb(var(--rift-accent) / 0.35) 0%, rgb(var(--rift-surface) / 0.95) 60%)`
-            : state === "send"
-            ? `radial-gradient(circle at 35% 30%, rgb(var(--rift-accent2) / 0.3) 0%, rgb(var(--rift-surface) / 0.95) 60%)`
-            : `radial-gradient(circle at 35% 30%, rgb(var(--rift-accent) / 0.2) 0%, rgb(var(--rift-surface) / 0.92) 60%)`,
-          boxShadow: `
-            0 8px 32px rgb(0 0 0 / 0.5),
-            0 0 0 1px rgb(var(--rift-accent) / ${dragging ? "0.4" : "0.18"}),
-            0 0 ${dragging ? "50" : "28"}px rgb(var(--rift-glow) / ${dragging ? "0.35" : "0.15"}),
-            inset 0 1px 0 rgb(255 255 255 / 0.1)
-          `,
-          backdropFilter: "blur(24px)",
-          transition: "all 0.35s cubic-bezier(0.16, 1, 0.3, 1)",
+          display: "block",
+          overflow: "visible",
+          transform: `perspective(900px) rotateX(${tilt.x}deg) rotateY(${tilt.y}deg)`,
+          transition: isRest
+            ? "transform 0.72s cubic-bezier(0.16,1,0.3,1)"
+            : "transform 0.09s ease-out",
         }}
       >
-        {dragging ? (
-          <>
-            <span
-              className="text-2xl font-mono font-black leading-none animate-float"
-              style={{
-                background:
-                  "linear-gradient(145deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)))",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-                backgroundClip: "text",
-              }}
-            >
-              ↓
-            </span>
-            <span
-              className="text-[9px] font-mono font-bold mt-1 tracking-widest"
-              style={{ color: "rgb(var(--rift-accent) / 0.8)" }}
-            >
-              DROP
-            </span>
-          </>
-        ) : state === "send" ? (
-          <span
-            className="text-[10px] font-mono font-bold tracking-widest"
-            style={{ color: "rgb(var(--rift-accent2))" }}
+        <defs>
+          {/* Ring animations + breathe keyframes — injected once at module scope */}
+          <style>{RING_CSS}</style>
+
+          {/* ── Filters ─────────────────────────────────────────────── */}
+          {/* Glow with sharp core preserved */}
+          <filter id="rfsm" x="-60%" y="-60%" width="220%" height="220%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="3.2" result="b"/>
+            <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+          {/* Soft medium blur for halos */}
+          <filter id="rfmd" x="-100%" y="-100%" width="300%" height="300%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="9"/>
+          </filter>
+          {/* Large blur for ambient background blob */}
+          <filter id="rflg" x="-150%" y="-150%" width="400%" height="400%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="22"/>
+          </filter>
+
+          {/* ── Sphere gradients ─────────────────────────────────────── */}
+          {/* Main 3D fill — bright spot tracks mouse via spec.cx/cy */}
+          <radialGradient id="rfsph" cx={`${spec.cx}%`} cy={`${spec.cy}%`} r="70%">
+            <stop offset="0%"   stopColor={`rgb(${baseRgb})`} stopOpacity="0.48"/>
+            <stop offset="40%"  stopColor="rgb(9,7,26)"        stopOpacity="0.88"/>
+            <stop offset="100%" stopColor="rgb(4,4,12)"        stopOpacity="1"/>
+          </radialGradient>
+
+          {/* Rim edge light */}
+          <radialGradient id="rfrim" cx="50%" cy="50%" r="50%">
+            <stop offset="60%"  stopColor="transparent"        stopOpacity="0"/>
+            <stop offset="100%" stopColor={`rgb(${baseRgb})`}  stopOpacity="0.3"/>
+          </radialGradient>
+
+          {/* Specular hot-spot — offset slightly above mouse position */}
+          <radialGradient
+            id="rfsp2"
+            cx={`${spec.cx}%`}
+            cy={`${Math.max(8, spec.cy - 8)}%`}
+            r="19%"
           >
-            SENDING
-          </span>
-        ) : state === "ready" ? (
-          <span
-            className="text-[11px] font-mono font-bold tracking-[0.12em]"
-            style={{ color: "rgb(var(--rift-accent))" }}
-          >
-            READY
-          </span>
-        ) : (
-          <>
-            <span
-              className="text-2xl font-mono font-black leading-none"
-              style={{
-                background:
-                  "linear-gradient(135deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)))",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-                backgroundClip: "text",
-                filter: "drop-shadow(0 0 8px rgb(var(--rift-glow) / 0.4))",
-              }}
+            <stop offset="0%"   stopColor="white" stopOpacity="0.85"/>
+            <stop offset="55%"  stopColor="white" stopOpacity="0.1"/>
+            <stop offset="100%" stopColor="white" stopOpacity="0"/>
+          </radialGradient>
+
+          {/* Ambient background radial */}
+          <radialGradient id="rfamb" cx="50%" cy="50%" r="50%">
+            <stop offset="0%"   stopColor={`rgb(${baseRgb})`} stopOpacity={String(ambAlpha)}/>
+            <stop offset="100%" stopColor={`rgb(${baseRgb})`} stopOpacity="0"/>
+          </radialGradient>
+
+          {/* Text gradient */}
+          <linearGradient id="rftg" x1="20%" y1="0%" x2="80%" y2="100%">
+            <stop offset="0%"   stopColor={`rgb(${baseRgb})`}/>
+            <stop offset="100%" stopColor="rgb(180,120,255)"/>
+          </linearGradient>
+        </defs>
+
+        {/* ══ 0. Ambient background glow ══════════════════════════════ */}
+        <ellipse
+          cx={PCX} cy={PCY} rx={145} ry={145}
+          fill="url(#rfamb)"
+          filter="url(#rflg)"
+        />
+
+        {/* ══ 1. Back arc base strokes (rendered UNDER the sphere) ════ */}
+        {RINGS.map((r, i) => (
+          <path
+            key={`bb${i}`}
+            d={bArc(r.rx, r.ry)}
+            fill="none"
+            stroke={`rgb(${r.rgb})`}
+            strokeWidth={r.sw}
+            strokeOpacity="0.13"
+            className="rfrb"
+          />
+        ))}
+
+        {/* ══ 2. Back arc blurred halo (under sphere) ═════════════════ */}
+        {RINGS.map((r, i) => (
+          <path
+            key={`bh${i}`}
+            d={bArc(r.rx, r.ry)}
+            fill="none"
+            stroke={`rgb(${r.rgb})`}
+            strokeWidth={r.gsw}
+            strokeOpacity="0.05"
+            filter="url(#rfmd)"
+            className="rfrb"
+          />
+        ))}
+
+        {/* ══ 3. Sphere drop shadow ════════════════════════════════════ */}
+        <ellipse
+          cx={PCX + 3} cy={PCY + 15}
+          rx={46} ry={11}
+          fill="black"
+          opacity="0.45"
+          filter="url(#rfmd)"
+        />
+
+        {/* ══ 4. Sphere body ═══════════════════════════════════════════ */}
+        <circle cx={PCX} cy={PCY} r={PSR} fill="url(#rfsph)"/>
+
+        {/* ══ 5. Sphere rim edge glow ══════════════════════════════════ */}
+        <circle cx={PCX} cy={PCY} r={PSR} fill="url(#rfrim)"/>
+
+        {/* ══ 6. Sphere inner structural depth rings ═══════════════════ */}
+        <circle
+          cx={PCX} cy={PCY} r={PSR - 9}
+          fill="none"
+          stroke={`rgb(${baseRgb})`}
+          strokeWidth="0.5"
+          strokeOpacity="0.13"
+        />
+        <circle
+          cx={PCX} cy={PCY} r={PSR - 20}
+          fill="none"
+          stroke={`rgb(${baseRgb})`}
+          strokeWidth="0.4"
+          strokeOpacity="0.07"
+        />
+
+        {/* ══ 7. Specular highlight — tracks mouse ═════════════════════ */}
+        <circle cx={PCX} cy={PCY} r={PSR} fill="url(#rfsp2)"/>
+
+        {/* ══ 8. Front arc base strokes (rendered ABOVE sphere) ════════ */}
+        {RINGS.map((r, i) => (
+          <path
+            key={`fb${i}`}
+            d={fArc(r.rx, r.ry)}
+            fill="none"
+            stroke={`rgb(${r.rgb})`}
+            strokeWidth={r.sw}
+            strokeOpacity="0.4"
+            className="rfrb"
+          />
+        ))}
+
+        {/* ══ 9. Front arc blurred halo (above sphere) ═════════════════ */}
+        {RINGS.map((r, i) => (
+          <path
+            key={`fh${i}`}
+            d={fArc(r.rx, r.ry)}
+            fill="none"
+            stroke={`rgb(${r.rgb})`}
+            strokeWidth={r.gsw * 1.6}
+            strokeOpacity="0.08"
+            filter="url(#rfsm)"
+          />
+        ))}
+
+        {/* ══ 10. Traveling glow — blurred outer halo (full ellipse) ═══ */}
+        {RINGS.map((r, i) => (
+          <ellipse
+            key={`tg${i}`}
+            cx={PCX} cy={PCY} rx={r.rx} ry={r.ry}
+            fill="none"
+            stroke={`rgb(${r.rgb})`}
+            strokeWidth={r.gsw * 2}
+            strokeOpacity="0.22"
+            strokeDasharray={`${r.gLen} ${r.gGap}`}
+            className={r.cls}
+            filter="url(#rfsm)"
+          />
+        ))}
+
+        {/* ══ 11. Traveling glow — sharp bright core (full ellipse) ════ */}
+        {RINGS.map((r, i) => (
+          <ellipse
+            key={`tc${i}`}
+            cx={PCX} cy={PCY} rx={r.rx} ry={r.ry}
+            fill="none"
+            stroke={`rgb(${r.rgb})`}
+            strokeWidth={r.sw + 0.6}
+            strokeOpacity="0.95"
+            strokeDasharray={`${r.cLen} ${r.cGap}`}
+            className={r.cls}
+          />
+        ))}
+
+        {/* ══ 12. Sphere state label ════════════════════════════════════ */}
+        <g filter="url(#rfsm)">
+          {sym && (
+            <text
+              x={PCX}
+              y={sub ? PCY - 4 : PCY + 5}
+              textAnchor="middle"
+              dominantBaseline="middle"
+              fontFamily="'JetBrains Mono', monospace"
+              fontSize={sym === "◈" ? 22 : 28}
+              fontWeight="900"
+              fill="url(#rftg)"
             >
-              ◈
-            </span>
-            <span
-              className="text-[9px] font-mono mt-0.5 tracking-[0.2em]"
-              style={{ color: "rgb(var(--rift-muted) / 0.6)" }}
+              {sym}
+            </text>
+          )}
+          {sub && (
+            <text
+              x={PCX}
+              y={sym ? PCY + 14 : PCY + 5}
+              textAnchor="middle"
+              dominantBaseline="middle"
+              fontFamily="'JetBrains Mono', monospace"
+              fontSize="9"
+              fontWeight="700"
+              letterSpacing="3"
+              fill={`rgb(${baseRgb})`}
+              fillOpacity="0.82"
             >
-              RIFT
-            </span>
-          </>
-        )}
-      </div>
+              {sub}
+            </text>
+          )}
+        </g>
+      </svg>
     </div>
   );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function DropZone() {
   const [isDragging, setIsDragging] = useState(false);
@@ -248,7 +417,7 @@ export function DropZone() {
         </p>
       </div>
 
-      {/* Portal */}
+      {/* 3D SVG Portal */}
       <Portal
         dragging={isDragging}
         hasFiles={stagedFiles.length > 0}
@@ -410,9 +579,9 @@ export function DropZone() {
               strokeWidth="1.2"
               strokeLinejoin="round"
             />
-            <line x1="5" y1="8"  x2="13" y2="8"  stroke="rgb(var(--rift-accent) / 0.4)" strokeWidth="1" strokeLinecap="round" />
-            <line x1="5" y1="11" x2="13" y2="11" stroke="rgb(var(--rift-accent) / 0.4)" strokeWidth="1" strokeLinecap="round" />
-            <line x1="5" y1="14" x2="10" y2="14" stroke="rgb(var(--rift-accent) / 0.4)" strokeWidth="1" strokeLinecap="round" />
+            <line x1="5" y1="8"  x2="13" y2="8"  stroke="rgb(var(--rift-accent) / 0.4)" strokeWidth="1" strokeLinecap="round"/>
+            <line x1="5" y1="11" x2="13" y2="11" stroke="rgb(var(--rift-accent) / 0.4)" strokeWidth="1" strokeLinecap="round"/>
+            <line x1="5" y1="14" x2="10" y2="14" stroke="rgb(var(--rift-accent) / 0.4)" strokeWidth="1" strokeLinecap="round"/>
           </svg>
         </button>
       </div>
