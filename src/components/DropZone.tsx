@@ -42,7 +42,6 @@ function Portal({
         transition: "transform 0.4s cubic-bezier(0.16, 1, 0.3, 1)",
       }}
     >
-      {/* Outer ambient glow orb */}
       <div
         className="absolute inset-0 rounded-full"
         style={{
@@ -54,8 +53,6 @@ function Portal({
           transition: "all 0.5s ease",
         }}
       />
-
-      {/* Ring 3 — outermost, slow */}
       <div
         className="absolute rounded-full animate-spin-slowest"
         style={{
@@ -65,8 +62,6 @@ function Portal({
           transition: "box-shadow 0.4s ease",
         }}
       />
-
-      {/* Ring 2 — mid, reverse */}
       <div
         className="absolute rounded-full animate-spin-slower"
         style={{
@@ -77,8 +72,6 @@ function Portal({
           transition: "box-shadow 0.4s ease",
         }}
       />
-
-      {/* Ring 1 — inner, medium speed */}
       <div
         className="absolute rounded-full animate-spin-slow"
         style={{
@@ -88,8 +81,6 @@ function Portal({
           transition: "box-shadow 0.4s ease",
         }}
       />
-
-      {/* Breathe ring */}
       <div
         className="absolute rounded-full animate-ring-breathe"
         style={{
@@ -98,8 +89,6 @@ function Portal({
           boxShadow: `0 0 0 1px rgb(var(--rift-accent) / 0.08), 0 0 30px rgb(var(--rift-glow) / 0.06)`,
         }}
       />
-
-      {/* Center orb */}
       <div
         className="relative rounded-full flex flex-col items-center justify-center"
         style={{
@@ -141,23 +130,19 @@ function Portal({
             </span>
           </>
         ) : state === "send" ? (
-          <>
-            <span
-              className="text-[10px] font-mono font-bold tracking-widest"
-              style={{ color: "rgb(var(--rift-accent2))" }}
-            >
-              SENDING
-            </span>
-          </>
+          <span
+            className="text-[10px] font-mono font-bold tracking-widest"
+            style={{ color: "rgb(var(--rift-accent2))" }}
+          >
+            SENDING
+          </span>
         ) : state === "ready" ? (
-          <>
-            <span
-              className="text-[11px] font-mono font-bold tracking-[0.12em]"
-              style={{ color: "rgb(var(--rift-accent))" }}
-            >
-              READY
-            </span>
-          </>
+          <span
+            className="text-[11px] font-mono font-bold tracking-[0.12em]"
+            style={{ color: "rgb(var(--rift-accent))" }}
+          >
+            READY
+          </span>
         ) : (
           <>
             <span
@@ -186,12 +171,13 @@ function Portal({
 }
 
 export function DropZone() {
-  const [isDragging, setIsDragging] = useState(false);
+  const [isDragging, setIsDragging]   = useState(false);
   const stagedFiles    = useRiftStore((s) => s.stagedFiles);
   const setStagedFiles = useRiftStore((s) => s.setStagedFiles);
   const clearStaged    = useRiftStore((s) => s.clearStagedFiles);
   const selectedDevice = useRiftStore((s) => s.selectedDevice);
   const isSending      = useRiftStore((s) => s.isSending);
+  const setStickyNote  = useRiftStore((s) => s.setStickyNoteOpen);
   const { sendFiles }  = useTransferActions();
   const { call }       = useInvoke();
 
@@ -361,19 +347,65 @@ export function DropZone() {
         </p>
       )}
 
-      {/* Send button */}
-      <button
-        onClick={sendFiles}
-        disabled={!canSend}
-        className="px-12 py-3.5 btn-accent text-sm animate-glow-pulse disabled:animate-none"
-        style={{
-          minWidth: "180px",
-          fontSize: "0.75rem",
-          letterSpacing: "0.14em",
-        }}
-      >
-        {isSending ? "Sending…" : "Send Through"}
-      </button>
+      {/* Action row — Send Through + sticky note trigger */}
+      <div className="flex items-center gap-3">
+        <button
+          onClick={sendFiles}
+          disabled={!canSend}
+          className="px-12 py-3.5 btn-accent text-sm animate-glow-pulse disabled:animate-none"
+          style={{
+            minWidth: "180px",
+            fontSize: "0.75rem",
+            letterSpacing: "0.14em",
+          }}
+        >
+          {isSending ? "Sending…" : "Send Through"}
+        </button>
+
+        {/* Sticky note / text trigger */}
+        <button
+          onClick={() => setStickyNote(true)}
+          title="Send text"
+          className="flex items-center justify-center rounded-2xl transition-all duration-200"
+          style={{
+            width: "44px",
+            height: "44px",
+            background: "rgb(var(--rift-surface2) / 0.55)",
+            boxShadow: "0 0 0 1px rgb(255 255 255 / 0.06), 0 2px 8px rgb(0 0 0 / 0.25)",
+            backdropFilter: "blur(12px)",
+            flexShrink: 0,
+          }}
+          onMouseEnter={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.boxShadow =
+              "0 0 0 1px rgb(var(--rift-accent) / 0.35), 0 0 16px rgb(var(--rift-glow) / 0.2)";
+          }}
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.boxShadow =
+              "0 0 0 1px rgb(255 255 255 / 0.06), 0 2px 8px rgb(0 0 0 / 0.25)";
+          }}
+        >
+          {/* Mini sticky-note SVG icon */}
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <polygon
+              points="2,2 13,2 16,5 16,16 2,16"
+              fill="rgb(var(--rift-accent) / 0.15)"
+              stroke="rgb(var(--rift-accent) / 0.55)"
+              strokeWidth="1.2"
+              strokeLinejoin="round"
+            />
+            <polygon
+              points="13,2 16,5 13,5"
+              fill="rgb(var(--rift-accent) / 0.3)"
+              stroke="rgb(var(--rift-accent) / 0.55)"
+              strokeWidth="1.2"
+              strokeLinejoin="round"
+            />
+            <line x1="5" y1="8"  x2="13" y2="8"  stroke="rgb(var(--rift-accent) / 0.4)" strokeWidth="1" strokeLinecap="round" />
+            <line x1="5" y1="11" x2="13" y2="11" stroke="rgb(var(--rift-accent) / 0.4)" strokeWidth="1" strokeLinecap="round" />
+            <line x1="5" y1="14" x2="10" y2="14" stroke="rgb(var(--rift-accent) / 0.4)" strokeWidth="1" strokeLinecap="round" />
+          </svg>
+        </button>
+      </div>
     </div>
   );
 }

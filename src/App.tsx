@@ -9,6 +9,8 @@ import { DevicePopup } from "@/components/DevicePopup";
 import { StatusBar } from "@/components/StatusBar";
 import { ThemeSelector } from "@/components/ThemeSelector";
 import { HotspotPanel } from "@/components/HotspotPanel";
+import { TextTransferPanel } from "@/components/TextTransferPanel";
+import { IncomingTextDialog } from "@/components/IncomingTextDialog";
 
 export default function App() {
   useTheme();
@@ -26,7 +28,6 @@ export default function App() {
         className="absolute inset-0 pointer-events-none overflow-hidden"
         style={{ zIndex: 0 }}
       >
-        {/* Primary orb — follows accent */}
         <div
           className="ambient-orb animate-orb-drift-a"
           style={{
@@ -37,7 +38,6 @@ export default function App() {
             background: `radial-gradient(ellipse at center, rgb(var(--rift-accent) / 0.055) 0%, transparent 70%)`,
           }}
         />
-        {/* Secondary orb — accent2 */}
         <div
           className="ambient-orb animate-orb-drift-b"
           style={{
@@ -48,7 +48,6 @@ export default function App() {
             background: `radial-gradient(ellipse at center, rgb(var(--rift-accent2) / 0.05) 0%, transparent 70%)`,
           }}
         />
-        {/* Mid orb — warm center */}
         <div
           className="ambient-orb animate-orb-drift-c"
           style={{
@@ -61,7 +60,7 @@ export default function App() {
         />
       </div>
 
-      {/* ── Main layout — floating panels with gap ── */}
+      {/* ── Main layout ── */}
       <div
         className="relative flex h-full gap-2.5 p-2.5 pb-14"
         style={{ zIndex: 1 }}
@@ -72,7 +71,10 @@ export default function App() {
       </div>
 
       {/* ── Floating status pill ── */}
-      <div className="absolute bottom-0 left-0 right-0 flex justify-center pb-2.5 px-3" style={{ zIndex: 2 }}>
+      <div
+        className="absolute bottom-0 left-0 right-0 flex justify-center pb-2.5 px-3"
+        style={{ zIndex: 2 }}
+      >
         <StatusBar />
       </div>
 
@@ -81,6 +83,8 @@ export default function App() {
       <DevicePopup />
       <ThemeSelector />
       <HotspotPanel />
+      <TextTransferPanel />
+      <IncomingTextDialog />
     </div>
   );
 }

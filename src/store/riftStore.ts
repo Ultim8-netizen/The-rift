@@ -59,6 +59,9 @@ interface RiftStore {
   isSending: boolean;
   setIsSending: (v: boolean) => void;
 
+  stickyNoteOpen: boolean;
+  setStickyNoteOpen: (open: boolean) => void;
+
   // ── Hotspot state ─────────────────────────────────────────────────────────
   hotspotRole: HotspotRole;
   hotspotInfo: HotspotInfo | null;
@@ -167,6 +170,9 @@ export const useRiftStore = create<RiftStore>((set) => ({
 
   isSending: false,
   setIsSending: (v) => set({ isSending: v }),
+
+  stickyNoteOpen: false,
+  setStickyNoteOpen: (open) => set({ stickyNoteOpen: open }),
 
   // Hotspot
   hotspotRole: "none",

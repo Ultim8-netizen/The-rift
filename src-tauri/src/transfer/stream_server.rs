@@ -17,9 +17,14 @@
 //!
 //!   Client → "DONE\n"              after sending all chunks for this stream
 //!
-//! When all chunks across both streams are received and individually verified,
-//! the server does a full-file BLAKE3 check. On pass it emits transfer_complete.
-//! On fail it emits transfer_error so the sender can re-initiate.
+//! Finalization gate (race-condition fix):
+//!   Each file has a `streams_done` AtomicUsize (starts at 0, max 2).
+//!   When a stream connection receives DONE it increments the counter.
+//!   `finalize_file` is only called when `streams_done` reaches 2 — meaning
+//!   both TCP connections have fully written all their chunks and sent DONE.
+//!   This prevents the previous race where whichever stream delivered the
+//!   last chunk triggered hashing while the other stream's final write was
+//!   still in flight.
 
 use crate::state::SharedState;
 use std::sync::Arc;
@@ -117,7 +122,25 @@ async fn handle_connection_inner(
     loop {
         line.clear();
         match reader.read_line(&mut line).await {
-            Ok(0) => break, // clean close
+            Ok(0) => {
+                // Clean TCP close without DONE — treat as implicit DONE so we
+                // don't permanently block the streams_done gate.
+                eprintln!(
+                    "[StreamServer] stream {stream_id} closed without DONE \
+                     (file={file_index}, transfer={transfer_id}) — treating as DONE"
+                );
+                try_finalize(
+                    &transfer_id,
+                    file_index,
+                    stream_id,
+                    &file_state,
+                    &transfer_state,
+                    &state,
+                    &app,
+                )
+                .await;
+                break;
+            }
             Ok(_) => {}
             Err(e) => {
                 eprintln!("[StreamServer] read error: {e}");
@@ -131,6 +154,22 @@ async fn handle_connection_inner(
             eprintln!(
                 "[StreamServer] DONE from stream {stream_id} for file {file_index}"
             );
+            // ── RACE FIX ────────────────────────────────────────────────────
+            // Increment streams_done and only finalize when both streams have
+            // confirmed they finished writing. This replaces the old
+            // `completed_count == total_chunks` trigger which fired as soon as
+            // the last chunk arrived — potentially before the other stream had
+            // flushed its own last write.
+            try_finalize(
+                &transfer_id,
+                file_index,
+                stream_id,
+                &file_state,
+                &transfer_state,
+                &state,
+                &app,
+            )
+            .await;
             break;
         }
 
@@ -197,18 +236,16 @@ async fn handle_connection_inner(
             })?;
         }
 
-        // Mark chunk complete and check if all chunks are in
-        let (completed_count, all_done) = {
+        // Mark chunk complete
+        let completed_count = {
             let mut completed = file_state.completed_chunks.lock().await;
             completed.insert(chunk_id);
-            let count = completed.len();
-            let done = count == file_state.manifest.total_chunks;
-            (count, done)
+            completed.len()
         };
 
         writer.write_all(format!("ACK {chunk_id}\n").as_bytes()).await?;
 
-        // Progress event — use completed_count * chunk_size as a proxy for bytes
+        // Progress event
         let _ = app.emit(
             "transfer_progress",
             &serde_json::json!({
@@ -223,24 +260,75 @@ async fn handle_connection_inner(
             }),
         );
 
-        if all_done {
-            eprintln!(
-                "[StreamServer] All {} chunks received for file {file_index} \
-                 in {transfer_id} — verifying",
-                file_state.manifest.total_chunks
-            );
-            let ts = transfer_state.clone();
-            let fs = file_state.clone();
-            let tid = transfer_id.clone();
-            let st = state.clone();
-            let ap = app.clone();
-            tokio::spawn(async move {
-                finalize_file(tid, file_index, fs, ts, st, ap).await;
-            });
-        }
+        // NOTE: we no longer trigger finalization here based on chunk count.
+        // Finalization is exclusively gated on streams_done reaching 2 (DONE
+        // received from both stream connections), which happens below in
+        // try_finalize when each stream sends its DONE command.
     }
 
     Ok(())
+}
+
+/// Increment `streams_done` for this file. When the counter reaches 2 (both
+/// TCP stream connections have sent DONE), verify that all expected chunks
+/// actually arrived and then kick off finalization.
+///
+/// The extra chunk-count guard catches the edge case where a stream closed
+/// without sending every chunk — in that scenario we emit an error rather
+/// than hashing a partial file.
+async fn try_finalize(
+    transfer_id: &str,
+    file_index: usize,
+    stream_id: u8,
+    file_state: &Arc<crate::state::StreamReceiveState>,
+    transfer_state: &Arc<crate::state::TransferReceiveState>,
+    state: &SharedState,
+    app: &AppHandle,
+) {
+    let prev = file_state.streams_done.fetch_add(1, Ordering::SeqCst);
+    let now  = prev + 1;
+
+    eprintln!(
+        "[StreamServer] stream {stream_id} DONE — streams_done={now}/2 \
+         for file {file_index} in {transfer_id}"
+    );
+
+    // Only the stream that brings the counter to 2 proceeds.
+    if now != 2 {
+        return;
+    }
+
+    // Both streams done — verify chunk completeness before hashing.
+    let received = file_state.completed_chunks.lock().await.len();
+    let expected = file_state.manifest.total_chunks;
+
+    if received != expected {
+        eprintln!(
+            "[StreamServer] Chunk count mismatch for file {file_index} in {transfer_id}: \
+             received {received}/{expected} — emitting error"
+        );
+        let _ = app.emit(
+            "transfer_error",
+            &serde_json::json!({
+                "transferId": transfer_id,
+                "message": format!(
+                    "Incomplete transfer: {} received {}/{} chunks",
+                    file_state.manifest.name, received, expected
+                ),
+            }),
+        );
+        return;
+    }
+
+    // All chunks present and both streams confirmed done — safe to hash.
+    let tid = transfer_id.to_string();
+    let fs  = file_state.clone();
+    let ts  = transfer_state.clone();
+    let st  = state.clone();
+    let ap  = app.clone();
+    tokio::spawn(async move {
+        finalize_file(tid, file_index, fs, ts, st, ap).await;
+    });
 }
 
 /// Verify the assembled file with BLAKE3 and emit the appropriate event.

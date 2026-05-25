@@ -162,6 +162,7 @@ async fn handle_manifest(
             completed_chunks: tokio::sync::Mutex::new(HashSet::new()),
             dest_path: dest,
             file_handle: tokio::sync::Mutex::new(file),
+            streams_done: AtomicUsize::new(0),  // ← fix: was missing
         }));
     }
 

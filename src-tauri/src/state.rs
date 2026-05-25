@@ -68,6 +68,12 @@ pub struct StreamReceiveState {
     pub completed_chunks: Mutex<HashSet<usize>>,
     pub dest_path: PathBuf,
     pub file_handle: Mutex<tokio::fs::File>,
+    /// Counts how many of the two TCP streams have sent DONE for this file.
+    /// Finalization fires only when this reaches 2 (both streams complete).
+    /// For files with only one stream's worth of chunks (very small files
+    /// where one stream gets 0 chunks), the sender still opens both
+    /// connections and sends DONE on both, so the gate of 2 is always correct.
+    pub streams_done: AtomicUsize,
 }
 
 #[allow(dead_code)]
