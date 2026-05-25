@@ -179,23 +179,43 @@ async fn accept_transfer(
     transfer_id: String,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
-    let pending = state
-        .lock()
-        .await
-        .pending_transfers
-        .get(&transfer_id)
-        .cloned()
-        .ok_or_else(|| "Pending transfer not found".to_string())?;
+    let (sender_ip, sender_port) = {
+        let s = state.lock().await;
+        let pending = s
+            .pending_transfers
+            .get(&transfer_id)
+            .cloned()
+            .ok_or_else(|| "Pending transfer not found".to_string())?;
 
-    let url = format!(
-        "http://{}:{}/accept/{}",
-        pending.sender_device.ip, pending.sender_device.port, transfer_id
-    );
+        // Use the IP from device state (correctly discovered via mDNS/broadcast/scan).
+        // The pending.sender_device.ip is self-reported by the sender using
+        // local_ip_address::local_ip() which returns the wrong IP on multi-interface
+        // machines. unwrap_or_else falls back gracefully — never returns an error.
+        let ip = s
+            .devices
+            .get(&pending.sender_device.id)
+            .map(|d| d.ip.clone())
+            .unwrap_or_else(|| {
+                eprintln!(
+                    "[Accept] Sender {} not in device state — falling back to self-reported IP {}",
+                    pending.sender_device.id, pending.sender_device.ip
+                );
+                pending.sender_device.ip.clone()
+            });
+
+        (ip, pending.sender_device.port)
+    };
+
+    let url = format!("http://{}:{}/accept/{}", sender_ip, sender_port, transfer_id);
+    eprintln!("[Accept] → {url}");
+
     reqwest::Client::new()
         .post(&url)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Accept signal failed — is the sender still reachable? ({e})"))?;
+
+    state.lock().await.pending_transfers.remove(&transfer_id);
     Ok(())
 }
 
@@ -204,23 +224,32 @@ async fn decline_transfer(
     transfer_id: String,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
-    let pending = state
-        .lock()
-        .await
-        .pending_transfers
-        .get(&transfer_id)
-        .cloned()
-        .ok_or_else(|| "Pending transfer not found".to_string())?;
+    let (sender_ip, sender_port) = {
+        let s = state.lock().await;
+        let pending = s
+            .pending_transfers
+            .get(&transfer_id)
+            .cloned()
+            .ok_or_else(|| "Pending transfer not found".to_string())?;
 
-    let url = format!(
-        "http://{}:{}/decline/{}",
-        pending.sender_device.ip, pending.sender_device.port, transfer_id
-    );
+        let ip = s
+            .devices
+            .get(&pending.sender_device.id)
+            .map(|d| d.ip.clone())
+            .unwrap_or_else(|| pending.sender_device.ip.clone());
+
+        (ip, pending.sender_device.port)
+    };
+
+    let url = format!("http://{}:{}/decline/{}", sender_ip, sender_port, transfer_id);
+
     reqwest::Client::new()
         .post(&url)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Decline signal failed: {e}"))?;
+
+    state.lock().await.pending_transfers.remove(&transfer_id);
     Ok(())
 }
 
@@ -267,6 +296,21 @@ async fn get_hotspot_info(state: State<'_, SharedState>) -> Result<Option<Hotspo
     Ok(state.lock().await.hotspot_info.clone())
 }
 
+#[tauri::command]
+async fn detect_hotspot(state: State<'_, SharedState>) -> Result<HotspotInfo, String> {
+    match network::detect_hotspot_active().await {
+        Some(info) => {
+            state.lock().await.hotspot_info = Some(info.clone());
+            Ok(info)
+        }
+        None => Err(
+            "No active hotspot found. Make sure Mobile Hotspot is turned on \
+            in Windows Settings, then try again."
+                .to_string(),
+        ),
+    }
+}
+
 // ── App entry point ───────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -291,6 +335,7 @@ pub fn run() {
             stop_hotspot,
             connect_to_hotspot,
             get_hotspot_info,
+            detect_hotspot,
         ])
         .setup(move |app| {
             #[cfg(target_os = "android")]
@@ -318,7 +363,11 @@ pub fn run() {
 
                 let _ = network::captive::start_captive_portal(our_ip).await;
 
-                // Channel server
+                #[cfg(target_os = "windows")]
+                tauri::async_runtime::spawn(async {
+                    network::captive::add_firewall_rules().await;
+                });
+
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -329,7 +378,6 @@ pub fn run() {
                     });
                 }
 
-                // Transfer server (HTTP: /hello, /ping, /request, /manifest, etc.)
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -340,7 +388,6 @@ pub fn run() {
                     });
                 }
 
-                // Stream server (raw TCP :7477 for dual-stream file transfer)
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -351,7 +398,6 @@ pub fn run() {
                     });
                 }
 
-                // Heartbeat
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -362,7 +408,6 @@ pub fn run() {
                     });
                 }
 
-                // UDP broadcast discovery
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -373,7 +418,6 @@ pub fn run() {
                     });
                 }
 
-                // Subnet scan (delayed so transfer server is up first)
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();

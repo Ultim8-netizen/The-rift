@@ -5,14 +5,9 @@
 //!   2. HTTP captive portal on TCP :80 — serves NCSI / CNA check responses.
 //!   3. Hosts-file injection — rewrites NCSI hostnames → our IP.
 //!   4. WiFi power-save disable — platform-specific commands.
+//!   5. Windows Firewall rules — allows all Rift ports inbound.
 //!
-//! Android:
-//!   All four mechanisms above require root or are unavailable on Android.
-//!   On Android, WiFi keepalive is handled entirely by:
-//!     • WifiLock(WIFI_MODE_FULL_LOW_LATENCY) — acquired in android_wifi.rs
-//!     • MulticastLock                         — acquired in android_wifi.rs
-//!     • TCP rift-channel PINGs every 2 s      — keeps radio active
-//!   This module returns immediately on Android.
+//! Android: WiFi keepalive handled by WifiLock + MulticastLock + TCP pings.
 
 use std::net::Ipv4Addr;
 
@@ -40,8 +35,6 @@ const HOSTS_MARKER: &str = "# THE RIFT - DO NOT EDIT BELOW";
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 pub async fn start_captive_portal(our_ip: Ipv4Addr) -> anyhow::Result<()> {
-    // Android: WiFi keepalive is handled by WifiLock + MulticastLock +
-    // the TCP rift-channel ping loop. Nothing to do here.
     #[cfg(target_os = "android")]
     {
         let _ = our_ip;
@@ -51,7 +44,6 @@ pub async fn start_captive_portal(our_ip: Ipv4Addr) -> anyhow::Result<()> {
 
     #[cfg(not(target_os = "android"))]
     {
-        // 1. DNS on :53
         match UdpSocket::bind("0.0.0.0:53").await {
             Ok(sock) => {
                 eprintln!("[Captive] DNS responder on :53 — all NCSI queries → {our_ip}");
@@ -63,7 +55,6 @@ pub async fn start_captive_portal(our_ip: Ipv4Addr) -> anyhow::Result<()> {
             }
         }
 
-        // 2. HTTP captive portal on :80
         match tokio::net::TcpListener::bind("0.0.0.0:80").await {
             Ok(listener) => {
                 eprintln!("[Captive] HTTP captive portal on :80");
@@ -76,10 +67,102 @@ pub async fn start_captive_portal(our_ip: Ipv4Addr) -> anyhow::Result<()> {
             }
         }
 
-        // 3. WiFi power save
         disable_wifi_power_save().await;
 
         Ok(())
+    }
+}
+
+// ── Windows Firewall ──────────────────────────────────────────────────────────
+
+/// Adds Windows Firewall inbound allow rules for all Rift ports.
+///
+/// Ports covered:
+///   7474 TCP — HTTP transfer server (/hello, /ping, /request, /manifest, /accept, /decline)
+///   7475 TCP — Rift channel (persistent keepalive + ground-truth connectivity)
+///   7476 UDP — UDP broadcast discovery
+///   7477 TCP — Raw stream server (dual-stream file transfer)
+///
+/// Rules are idempotent: existing rules are deleted first so re-running the app
+/// never accumulates duplicates. Requires administrator privileges (enforced at
+/// launch via UAC manifest) — the netsh calls succeed silently if already elevated.
+///
+/// This is critical on Windows because Defender Firewall will silently block
+/// inbound connections on ports 7475–7477 unless explicitly allowed. Port 7474
+/// may already be allowed if Windows prompted on first connection, but 7477
+/// (the stream server) is a new port that Windows never auto-prompts for and
+/// WILL block, causing all file transfers to fail after the accept handshake
+/// appears to succeed.
+pub async fn add_firewall_rules() {
+    #[cfg(target_os = "windows")]
+    {
+        use tokio::process::Command;
+
+        // Delete stale rules first — idempotent, ignore errors
+        let _ = Command::new("netsh")
+            .args(["advfirewall", "firewall", "delete", "rule", "name=The Rift Transfer"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .output()
+            .await;
+        let _ = Command::new("netsh")
+            .args(["advfirewall", "firewall", "delete", "rule", "name=The Rift Discovery"])
+            .creation_flags(0x08000000)
+            .output()
+            .await;
+
+        // TCP inbound: 7474 (HTTP), 7475 (rift channel), 7477 (stream server)
+        let tcp_result = Command::new("netsh")
+            .args([
+                "advfirewall", "firewall", "add", "rule",
+                "name=The Rift Transfer",
+                "dir=in",
+                "action=allow",
+                "protocol=TCP",
+                "localport=7474,7475,7477",
+                "profile=any",
+            ])
+            .creation_flags(0x08000000)
+            .output()
+            .await;
+
+        match tcp_result {
+            Ok(o) if o.status.success() =>
+                eprintln!("[Firewall] TCP inbound rule added (7474, 7475, 7477)"),
+            Ok(o) =>
+                eprintln!("[Firewall] TCP rule warning: {}", String::from_utf8_lossy(&o.stdout).trim()),
+            Err(e) =>
+                eprintln!("[Firewall] TCP rule error: {e}"),
+        }
+
+        // UDP inbound: 7476 (broadcast discovery)
+        let udp_result = Command::new("netsh")
+            .args([
+                "advfirewall", "firewall", "add", "rule",
+                "name=The Rift Discovery",
+                "dir=in",
+                "action=allow",
+                "protocol=UDP",
+                "localport=7476",
+                "profile=any",
+            ])
+            .creation_flags(0x08000000)
+            .output()
+            .await;
+
+        match udp_result {
+            Ok(o) if o.status.success() =>
+                eprintln!("[Firewall] UDP inbound rule added (7476)"),
+            Ok(o) =>
+                eprintln!("[Firewall] UDP rule warning: {}", String::from_utf8_lossy(&o.stdout).trim()),
+            Err(e) =>
+                eprintln!("[Firewall] UDP rule error: {e}"),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Linux/macOS: no action needed — iptables/pf typically allow inbound
+        // on all ports by default in desktop environments.
     }
 }
 
@@ -233,7 +316,6 @@ async fn write_hosts_file(ip: Ipv4Addr) {
 }
 
 pub async fn cleanup_hosts_file() {
-    // Android: nothing to clean up.
     #[cfg(target_os = "android")]
     {
         return;
@@ -259,7 +341,7 @@ fn strip_rift_block(content: &str) -> String {
     }
 }
 
-// ── WiFi power-save disable (desktop only) ────────────────────────────────────
+// ── WiFi power-save disable ───────────────────────────────────────────────────
 
 #[cfg(not(target_os = "android"))]
 async fn disable_wifi_power_save() {
@@ -274,6 +356,7 @@ async fn disable_wifi_power_save() {
                 "12bbebe6-58d6-4636-95bb-3217ef867c1a",
                 "0",
             ])
+            .creation_flags(0x08000000)
             .output()
             .await;
         let _ = Command::new("powercfg")
@@ -284,10 +367,12 @@ async fn disable_wifi_power_save() {
                 "12bbebe6-58d6-4636-95bb-3217ef867c1a",
                 "0",
             ])
+            .creation_flags(0x08000000)
             .output()
             .await;
         let _ = Command::new("powercfg")
             .args(["/setactive", "SCHEME_CURRENT"])
+            .creation_flags(0x08000000)
             .output()
             .await;
         eprintln!("[Captive] Windows WiFi power save → Maximum Performance");

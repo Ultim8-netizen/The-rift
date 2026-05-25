@@ -4,6 +4,26 @@ import { useHotspot } from "@/hooks/useHotspot";
 
 type Tab = "host" | "join";
 
+function translateError(raw: string): string {
+  const r = raw.toLowerCase();
+  if (r.includes("no network profile") || r.includes("profile available") || r.includes("profile found")) {
+    return "No internet connection found. Connect to the internet first, then try again. Or enable Mobile Hotspot manually in Windows Settings and tap Detect below.";
+  }
+  if (r.includes("adapter") || r.includes("hostednetwork") || r.includes("mode=allow") || r.includes("not support")) {
+    return "Your WiFi adapter does not support this mode. Enable Mobile Hotspot manually in Windows Settings (Network & Internet → Mobile hotspot), then tap Detect below.";
+  }
+  if (r.includes("administrator") || r.includes("privilege") || r.includes("admin")) {
+    return "The Rift needs administrator privileges to create a hotspot. Please restart the app as Administrator.";
+  }
+  if (r.includes("tetheringstat") || r.includes("status=")) {
+    return "Windows could not start the hotspot. Try enabling it manually in Settings → Network & Internet → Mobile hotspot, then tap Detect below.";
+  }
+  if (r.includes("could not start") || r.includes("automatically")) {
+    return raw;
+  }
+  return "Could not start the hotspot automatically. Enable Mobile Hotspot in Windows Settings, then tap Detect below.";
+}
+
 function CopyField({ label, value }: { label: string; value: string }) {
   const [copied, setCopied] = useState(false);
 
@@ -43,23 +63,21 @@ function CopyField({ label, value }: { label: string; value: string }) {
 }
 
 export function HotspotPanel() {
-  const open = useRiftStore((s) => s.hotspotPanelOpen);
+  const open    = useRiftStore((s) => s.hotspotPanelOpen);
   const setOpen = useRiftStore((s) => s.setHotspotPanelOpen);
-  const { hotspotInfo, hotspotRole, startHotspot, stopHotspot, joinHotspot } =
+  const { hotspotInfo, hotspotRole, startHotspot, stopHotspot, joinHotspot, detectHotspot } =
     useHotspot();
 
-  const [tab, setTab] = useState<Tab>("host");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [joinSsid, setJoinSsid] = useState("");
+  const [tab, setTab]               = useState<Tab>("host");
+  const [loading, setLoading]       = useState(false);
+  const [error, setError]           = useState<string | null>(null);
+  const [joinSsid, setJoinSsid]     = useState("");
   const [joinPassword, setJoinPassword] = useState("");
   const overlayRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
-    const fn = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
+    const fn = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
     window.addEventListener("keydown", fn);
     return () => window.removeEventListener("keydown", fn);
   }, [open, setOpen]);
@@ -72,7 +90,7 @@ export function HotspotPanel() {
     try {
       await startHotspot();
     } catch (e: unknown) {
-      setError(String(e));
+      setError(translateError(String(e)));
     } finally {
       setLoading(false);
     }
@@ -84,7 +102,7 @@ export function HotspotPanel() {
     try {
       await stopHotspot();
     } catch (e: unknown) {
-      setError(String(e));
+      setError(translateError(String(e)));
     } finally {
       setLoading(false);
     }
@@ -92,7 +110,7 @@ export function HotspotPanel() {
 
   async function handleJoin() {
     if (!joinSsid.trim() || !joinPassword.trim()) {
-      setError("SSID and password are required.");
+      setError("Network name and password are required.");
       return;
     }
     setLoading(true);
@@ -100,26 +118,39 @@ export function HotspotPanel() {
     try {
       await joinHotspot(joinSsid.trim(), joinPassword.trim());
     } catch (e: unknown) {
-      setError(String(e));
+      setError(translateError(String(e)));
     } finally {
       setLoading(false);
     }
   }
 
-  const isHosting = hotspotRole === "host" && hotspotInfo !== null;
-  const isGuest = hotspotRole === "guest" && hotspotInfo !== null;
+  async function handleDetect() {
+    setLoading(true);
+    setError(null);
+    try {
+      await detectHotspot();
+    } catch {
+      // detectHotspot failure always maps to this fixed message; binding unused
+      setError("No active hotspot found. Make sure Mobile Hotspot is turned on in Windows Settings, then try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const isHosting = hotspotRole === "host"  && hotspotInfo !== null;
+  const isGuest   = hotspotRole === "guest" && hotspotInfo !== null;
+
+  const wasDetected = isHosting && hotspotInfo?.password === "";
 
   return (
     <div
       ref={overlayRef}
-      onClick={(e) => {
-        if (e.target === overlayRef.current) setOpen(false);
-      }}
+      onClick={(e) => { if (e.target === overlayRef.current) setOpen(false); }}
       className="fixed inset-0 z-50 flex items-center justify-center animate-fade-in"
       style={{ background: "rgb(0 0 0 / 0.55)", backdropFilter: "blur(14px)" }}
     >
       <div
-        className="glass-heavy rounded-3xl w-80 shadow-glass overflow-hidden animate-slide-up grad-border"
+        className="glass-heavy rounded-3xl w-80 shadow-glass overflow-hidden animate-slide-up"
         style={{ width: "20rem" }}
       >
         {/* Accent bar */}
@@ -140,7 +171,7 @@ export function HotspotPanel() {
               </p>
               <p className="font-semibold text-rift-text text-sm">
                 {isHosting
-                  ? "Your Hotspot is Active"
+                  ? wasDetected ? "Hotspot Detected" : "Your Hotspot is Active"
                   : isGuest
                   ? "Connected to Hotspot"
                   : "Connect Without a Router"}
@@ -157,13 +188,25 @@ export function HotspotPanel() {
           {/* Active host state */}
           {isHosting && hotspotInfo && (
             <div className="flex flex-col gap-3">
-              <p className="text-[10px] font-mono text-rift-muted/70 leading-relaxed">
-                On the other device, open Wi-Fi settings and connect using the
-                credentials below, then open The Rift.
-              </p>
-              <CopyField label="Network Name (SSID)" value={hotspotInfo.ssid} />
-              <CopyField label="Password" value={hotspotInfo.password} />
-              <CopyField label="Gateway IP" value={hotspotInfo.gatewayIp} />
+              {wasDetected ? (
+                <p className="text-[10px] font-mono text-rift-muted/70 leading-relaxed">
+                  Running on{" "}
+                  <span className="text-rift-accent font-semibold">{hotspotInfo.gatewayIp}</span>.
+                  The other device should already be connected. The Rift will discover it automatically.
+                </p>
+              ) : (
+                <p className="text-[10px] font-mono text-rift-muted/70 leading-relaxed">
+                  On the other device, open Wi-Fi settings and connect using the credentials below, then open The Rift.
+                </p>
+              )}
+
+              {!wasDetected && (
+                <>
+                  <CopyField label="Network Name (SSID)" value={hotspotInfo.ssid} />
+                  <CopyField label="Password" value={hotspotInfo.password} />
+                </>
+              )}
+              <CopyField label="Gateway (Host IP)" value={hotspotInfo.gatewayIp} />
 
               <button
                 onClick={handleStopHotspot}
@@ -180,10 +223,8 @@ export function HotspotPanel() {
             <div className="flex flex-col gap-3">
               <p className="text-[10px] font-mono text-rift-muted/70 leading-relaxed">
                 Connected to{" "}
-                <span className="text-rift-accent font-semibold">
-                  {hotspotInfo.ssid}
-                </span>
-                . The Rift is scanning for the host device.
+                <span className="text-rift-accent font-semibold">{hotspotInfo.ssid}</span>.
+                The Rift is scanning for the host device.
               </p>
               <CopyField label="Gateway (Host IP)" value={hotspotInfo.gatewayIp} />
               <button
@@ -200,7 +241,7 @@ export function HotspotPanel() {
             </div>
           )}
 
-          {/* Idle state — tab picker */}
+          {/* Idle state */}
           {!isHosting && !isGuest && (
             <>
               {/* Tabs */}
@@ -228,20 +269,18 @@ export function HotspotPanel() {
               {tab === "host" && (
                 <div className="flex flex-col gap-3">
                   <p className="text-[10px] font-mono text-rift-muted/70 leading-relaxed">
-                    This device creates a Wi-Fi hotspot. The other device
-                    connects to it using the generated credentials.
-                    Requires administrator privileges on Windows.
+                    This device creates a Wi-Fi hotspot. The other device connects to it using the
+                    generated credentials. Requires administrator privileges on Windows.
                   </p>
                   <button
                     onClick={handleStartHotspot}
                     disabled={loading}
-                    className="w-full py-2.5 rounded-xl text-rift-bg text-xs font-mono font-bold tracking-widest uppercase shadow-glow hover:shadow-glow-lg hover:scale-[1.01] transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed disabled:scale-100"
+                    className="w-full py-2.5 rounded-xl text-rift-bg text-xs font-mono font-bold tracking-widest uppercase transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed"
                     style={{
-                      background:
-                        "linear-gradient(135deg, rgb(var(--rift-accent)), rgb(var(--rift-accent-dim)))",
+                      background: "linear-gradient(135deg, rgb(var(--rift-accent)), rgb(var(--rift-accent-dim)))",
                     }}
                   >
-                    {loading ? "Creating…" : "Create Hotspot"}
+                    {loading ? "Starting…" : "Create Hotspot"}
                   </button>
                 </div>
               )}
@@ -265,19 +304,16 @@ export function HotspotPanel() {
                       placeholder="Password"
                       value={joinPassword}
                       onChange={(e) => setJoinPassword(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") void handleJoin();
-                      }}
+                      onKeyDown={(e) => { if (e.key === "Enter") void handleJoin(); }}
                       className="w-full px-3 py-2 rounded-xl text-xs font-mono text-rift-text placeholder-rift-muted/40 border border-rift-border/50 bg-transparent focus:outline-none focus:border-rift-accent/50 transition-colors"
                     />
                   </div>
                   <button
                     onClick={handleJoin}
                     disabled={loading || !joinSsid.trim() || !joinPassword.trim()}
-                    className="w-full py-2.5 rounded-xl text-rift-bg text-xs font-mono font-bold tracking-widest uppercase shadow-glow hover:shadow-glow-lg hover:scale-[1.01] transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed disabled:scale-100"
+                    className="w-full py-2.5 rounded-xl text-rift-bg text-xs font-mono font-bold tracking-widest uppercase transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed"
                     style={{
-                      background:
-                        "linear-gradient(135deg, rgb(var(--rift-accent)), rgb(var(--rift-accent-dim)))",
+                      background: "linear-gradient(135deg, rgb(var(--rift-accent)), rgb(var(--rift-accent-dim)))",
                     }}
                   >
                     {loading ? "Connecting…" : "Join Hotspot"}
@@ -289,13 +325,25 @@ export function HotspotPanel() {
 
           {/* Error display */}
           {error && (
-            <div
-              className="mt-3 rounded-xl px-3 py-2.5"
-              style={{ background: "rgb(var(--rift-error) / 0.08)" }}
-            >
-              <p className="text-[10px] font-mono text-rift-error/90 leading-snug">
-                {error}
-              </p>
+            <div className="mt-3 flex flex-col gap-2">
+              <div
+                className="rounded-xl px-3 py-2.5"
+                style={{ background: "rgb(var(--rift-error) / 0.08)" }}
+              >
+                <p className="text-[10px] font-mono text-rift-error/90 leading-snug">
+                  {error}
+                </p>
+              </div>
+
+              {tab === "host" && (
+                <button
+                  onClick={handleDetect}
+                  disabled={loading}
+                  className="w-full py-2.5 rounded-xl border border-rift-accent/30 text-rift-accent text-xs font-mono font-bold tracking-widest uppercase hover:bg-rift-accent/8 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {loading ? "Detecting…" : "Detect Active Hotspot"}
+                </button>
+              )}
             </div>
           )}
         </div>

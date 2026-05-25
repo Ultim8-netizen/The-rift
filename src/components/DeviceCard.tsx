@@ -11,6 +11,7 @@ const OS_META: Record<string, { label: string; color: string }> = {
 
 export function DeviceCard({ device }: { device: Device }) {
   const selectedDevice      = useRiftStore((s) => s.selectedDevice);
+  const selectDevice        = useRiftStore((s) => s.selectDevice);
   const riftedDevices       = useRiftStore((s) => s.riftedDevices);
   const reconnectingDevices = useRiftStore((s) => s.reconnectingDevices);
   const setDevicePopup      = useRiftStore((s) => s.setDevicePopup);
@@ -20,7 +21,6 @@ export function DeviceCard({ device }: { device: Device }) {
   const isReconnecting = reconnectingDevices.includes(device.id);
   const osMeta         = OS_META[device.os] ?? OS_META.unknown;
 
-  // Build shadow based on state
   let cardShadow: string;
   if (isSelected) {
     cardShadow = `
@@ -60,9 +60,24 @@ export function DeviceCard({ device }: { device: Device }) {
     cardBg = `rgb(var(--rift-surface2) / 0.48)`;
   }
 
+  function handleCardClick() {
+    // ── KEY CHANGE ──────────────────────────────────────────────────────────
+    // Single click = immediate select/deselect. No popup required.
+    // This removes the two-step flow (card click → popup → "Select for Transfer")
+    // that left selectedDevice null and the send button permanently disabled.
+    //
+    // Clicking an unselected device: selects it. "Sending to X" shows immediately.
+    // Clicking the already-selected device: opens popup (for info or to deselect).
+    if (!isSelected) {
+      selectDevice(device);
+    } else {
+      setDevicePopup(device);
+    }
+  }
+
   return (
     <button
-      onClick={() => setDevicePopup(device)}
+      onClick={handleCardClick}
       className="w-full text-left animate-slide-up"
       style={{
         background: cardBg,
@@ -119,9 +134,9 @@ export function DeviceCard({ device }: { device: Device }) {
           </p>
         </div>
 
-        {/* Right column: status + latency */}
+        {/* Right column: status + latency + info button */}
         <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
-          {/* Status dot / glow */}
+          {/* Status dot */}
           {isRifted ? (
             <span className="status-dot-live" />
           ) : isReconnecting ? (
@@ -160,8 +175,18 @@ export function DeviceCard({ device }: { device: Device }) {
         </div>
       </div>
 
+      {/* Selected indicator */}
+      {isSelected && (
+        <p
+          className="text-[9px] font-mono mt-1.5 tracking-wide"
+          style={{ color: "rgb(var(--rift-accent) / 0.7)" }}
+        >
+          selected · tap again for details
+        </p>
+      )}
+
       {/* Reconnecting label */}
-      {isReconnecting && (
+      {isReconnecting && !isSelected && (
         <p
           className="text-[9px] font-mono mt-1.5 tracking-wide"
           style={{ color: "rgb(var(--rift-warning) / 0.55)" }}

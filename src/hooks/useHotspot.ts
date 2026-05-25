@@ -4,11 +4,11 @@ import { useRiftStore } from "@/store/riftStore";
 import { HotspotInfo } from "@/types";
 
 export function useHotspot() {
-  const setHotspotInfo = useRiftStore((s) => s.setHotspotInfo);
-  const setHotspotRole = useRiftStore((s) => s.setHotspotRole);
+  const setHotspotInfo   = useRiftStore((s) => s.setHotspotInfo);
+  const setHotspotRole   = useRiftStore((s) => s.setHotspotRole);
   const setNetworkStatus = useRiftStore((s) => s.setNetworkStatus);
-  const hotspotInfo = useRiftStore((s) => s.hotspotInfo);
-  const hotspotRole = useRiftStore((s) => s.hotspotRole);
+  const hotspotInfo      = useRiftStore((s) => s.hotspotInfo);
+  const hotspotRole      = useRiftStore((s) => s.hotspotRole);
 
   const startHotspot = useCallback(async (): Promise<HotspotInfo> => {
     const info = await invoke<HotspotInfo>("start_hotspot");
@@ -27,10 +27,7 @@ export function useHotspot() {
 
   const joinHotspot = useCallback(
     async (ssid: string, password: string): Promise<HotspotInfo> => {
-      const info = await invoke<HotspotInfo>("connect_to_hotspot", {
-        ssid,
-        password,
-      });
+      const info = await invoke<HotspotInfo>("connect_to_hotspot", { ssid, password });
       setHotspotInfo(info);
       setHotspotRole("guest");
       setNetworkStatus("hotspot");
@@ -39,5 +36,15 @@ export function useHotspot() {
     [setHotspotInfo, setHotspotRole, setNetworkStatus]
   );
 
-  return { hotspotInfo, hotspotRole, startHotspot, stopHotspot, joinHotspot };
+  // Detects an already-running hotspot (user enabled it manually in Windows Settings).
+  // Does not attempt to create one. Triggers a rescan after detection.
+  const detectHotspot = useCallback(async (): Promise<HotspotInfo> => {
+    const info = await invoke<HotspotInfo>("detect_hotspot");
+    setHotspotInfo(info);
+    setHotspotRole("host");
+    setNetworkStatus("hotspot");
+    return info;
+  }, [setHotspotInfo, setHotspotRole, setNetworkStatus]);
+
+  return { hotspotInfo, hotspotRole, startHotspot, stopHotspot, joinHotspot, detectHotspot };
 }
