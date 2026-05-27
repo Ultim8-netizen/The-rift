@@ -15,7 +15,7 @@ function fmt(bytes: number): string {
   return `${parseFloat((bytes / k ** i).toFixed(1))} ${s[i]}`;
 }
 
-// ── Portal geometry (module-level — computed once) ────────────────────────────
+// ── Portal geometry (module-level) ────────────────────────────────────────────
 const PCX = 150, PCY = 150, PSR = 52;
 
 function ellipsePerim(rx: number, ry: number): number {
@@ -28,29 +28,30 @@ interface RingSpec {
   dur: string; delay: string; sw: number; gsw: number;
 }
 
+// Dramatically different inclinations for genuine 3D depth:
+// Ring 0 — near-equatorial (ratio 8.4:1, flat disc)
+// Ring 1 — mid-inclined   (ratio 1.7:1, 45° tilt)
+// Ring 2 — near-polar     (ratio ~1:1, almost circular)
 const BASE_RINGS: RingSpec[] = [
-  // Equatorial: very flat ellipse, tilted ~75° from face-on
-  { rx: 115, ry: 23,  rgb: "0,200,255",   dur: "5.5s",  delay: "0s",    sw: 1.2, gsw: 10 },
-  // Intermediate: ~45° inclination
-  { rx: 88,  ry: 56,  rgb: "130,75,255",  dur: "8.4s",  delay: "-2.6s", sw: 1.5, gsw: 12 },
-  // Steep: nearly vertical, appears nearly circular
-  { rx: 70,  ry: 67,  rgb: "170,210,255", dur: "11.2s", delay: "-5.8s", sw: 1.8, gsw: 14 },
+  { rx: 118, ry: 14,  rgb: "0,200,255",   dur: "5.5s",  delay: "0s",    sw: 1.2, gsw: 10 },
+  { rx: 85,  ry: 50,  rgb: "130,75,255",  dur: "8.4s",  delay: "-2.6s", sw: 1.5, gsw: 12 },
+  { rx: 62,  ry: 61,  rgb: "170,210,255", dur: "11.2s", delay: "-5.8s", sw: 1.8, gsw: 14 },
 ];
 
 const RINGS = BASE_RINGS.map((r, i) => {
   const C    = Math.round(ellipsePerim(r.rx, r.ry));
-  const gLen = Math.round(C * 0.14);  // blurred halo segment length
-  const cLen = Math.round(C * 0.052); // bright core segment length
+  const gLen = Math.round(C * 0.14);
+  const cLen = Math.round(C * 0.052);
   return { ...r, C, gLen, gGap: C - gLen, cLen, cGap: C - cLen, cls: `rfrt${i}` };
 });
 
-// Paths for upper (back) and lower (front) arcs — enables sphere to occlude correctly
+// Half-arc path generators — back = top half (y < PCY), front = bottom half (y >= PCY)
 const bArc = (rx: number, ry: number) =>
   `M ${PCX + rx},${PCY} A ${rx},${ry} 0 0,1 ${PCX - rx},${PCY}`;
 const fArc = (rx: number, ry: number) =>
   `M ${PCX - rx},${PCY} A ${rx},${ry} 0 0,1 ${PCX + rx},${PCY}`;
 
-// CSS injected into the SVG <style> tag — static, never recalculated
+// CSS: dashoffset animation per ring + breathe for base strokes
 const RING_CSS =
   RINGS.map((r) =>
     `.${r.cls}{animation:${r.cls}kf ${r.dur} linear infinite ${r.delay}}` +
@@ -72,8 +73,8 @@ function Portal({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [tilt, setTilt] = useState({ x: 0, y: 0 });
-  // spec.cx / spec.cy: 0–100 percentages driving both sphere fill and specular
-  const [spec, setSpec] = useState({ cx: 36, cy: 30 });
+  // spec.cx/cy: 0–100 percentages, now covering the full sphere surface
+  const [spec, setSpec] = useState({ cx: 50, cy: 50 });
 
   const state    = dragging ? "drop" : isSending ? "send" : hasFiles ? "ready" : "idle";
   const baseRgb  = state === "send" ? "130,75,255" : "0,200,255";
@@ -85,13 +86,15 @@ function Portal({
     if (!r) return;
     const nx = (e.clientX - r.left - r.width  / 2) / (r.width  / 2); // -1..1
     const ny = (e.clientY - r.top  - r.height / 2) / (r.height / 2); // -1..1
-    setTilt({ x: ny * -13, y: nx * 13 });
-    setSpec({ cx: 36 + nx * 13, cy: 30 + ny * 11 });
+    // Increased tilt range from ±13° to ±22° for more dramatic 3D
+    setTilt({ x: ny * -22, y: nx * 22 });
+    // Full sphere coverage: spec ranges 6%–94% instead of the old narrow 23%–49%
+    setSpec({ cx: 50 + nx * 44, cy: 50 + ny * 44 });
   }
 
   function onMouseLeave() {
     setTilt({ x: 0, y: 0 });
-    setSpec({ cx: 36, cy: 30 });
+    setSpec({ cx: 50, cy: 50 });
   }
 
   const [sym, sub] =
@@ -114,55 +117,76 @@ function Portal({
         style={{
           display: "block",
           overflow: "visible",
-          transform: `perspective(900px) rotateX(${tilt.x}deg) rotateY(${tilt.y}deg)`,
+          transform: `perspective(700px) rotateX(${tilt.x}deg) rotateY(${tilt.y}deg)`,
           transition: isRest
             ? "transform 0.72s cubic-bezier(0.16,1,0.3,1)"
             : "transform 0.09s ease-out",
         }}
       >
         <defs>
-          {/* Ring animations + breathe keyframes — injected once at module scope */}
+          {/* Ring animations + breathe keyframes */}
           <style>{RING_CSS}</style>
 
+          {/* ── Hemisphere masks for genuine 3D ring occlusion ───────── */}
+          {/* Front hemisphere: only shows y >= PCY (bottom half = front of orbit) */}
+          <mask id="rfFH">
+            <rect x="0" y={PCY} width="300" height="300" fill="white"/>
+          </mask>
+          {/* Back hemisphere: only shows y < PCY (top half = back of orbit) */}
+          <mask id="rfBH">
+            <rect x="0" y="0" width="300" height={PCY} fill="white"/>
+          </mask>
+
           {/* ── Filters ─────────────────────────────────────────────── */}
-          {/* Glow with sharp core preserved */}
+          {/* Sharp glow — preserves bright core */}
           <filter id="rfsm" x="-60%" y="-60%" width="220%" height="220%">
             <feGaussianBlur in="SourceGraphic" stdDeviation="3.2" result="b"/>
             <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
           </filter>
-          {/* Soft medium blur for halos */}
+          {/* Soft medium blur for arc halos */}
           <filter id="rfmd" x="-100%" y="-100%" width="300%" height="300%">
             <feGaussianBlur in="SourceGraphic" stdDeviation="9"/>
           </filter>
-          {/* Large blur for ambient background blob */}
+          {/* Large blur for ambient background */}
           <filter id="rflg" x="-150%" y="-150%" width="400%" height="400%">
             <feGaussianBlur in="SourceGraphic" stdDeviation="22"/>
           </filter>
 
           {/* ── Sphere gradients ─────────────────────────────────────── */}
-          {/* Main 3D fill — bright spot tracks mouse via spec.cx/cy */}
+          {/* Main 3D fill — bright specular tracks mouse across full sphere */}
           <radialGradient id="rfsph" cx={`${spec.cx}%`} cy={`${spec.cy}%`} r="70%">
-            <stop offset="0%"   stopColor={`rgb(${baseRgb})`} stopOpacity="0.48"/>
-            <stop offset="40%"  stopColor="rgb(9,7,26)"        stopOpacity="0.88"/>
+            <stop offset="0%"   stopColor={`rgb(${baseRgb})`} stopOpacity="0.52"/>
+            <stop offset="35%"  stopColor="rgb(9,7,26)"        stopOpacity="0.92"/>
             <stop offset="100%" stopColor="rgb(4,4,12)"        stopOpacity="1"/>
           </radialGradient>
 
-          {/* Rim edge light */}
+          {/* Rim edge — accent color bleeds at the sphere silhouette */}
           <radialGradient id="rfrim" cx="50%" cy="50%" r="50%">
-            <stop offset="60%"  stopColor="transparent"        stopOpacity="0"/>
-            <stop offset="100%" stopColor={`rgb(${baseRgb})`}  stopOpacity="0.3"/>
+            <stop offset="62%"  stopColor="transparent"       stopOpacity="0"/>
+            <stop offset="100%" stopColor={`rgb(${baseRgb})`} stopOpacity="0.32"/>
           </radialGradient>
 
-          {/* Specular hot-spot — offset slightly above mouse position */}
+          {/* Primary specular hot-spot — no clamp, tracks mouse fully */}
           <radialGradient
             id="rfsp2"
             cx={`${spec.cx}%`}
-            cy={`${Math.max(8, spec.cy - 8)}%`}
+            cy={`${spec.cy - 5}%`}
             r="19%"
           >
-            <stop offset="0%"   stopColor="white" stopOpacity="0.85"/>
-            <stop offset="55%"  stopColor="white" stopOpacity="0.1"/>
+            <stop offset="0%"   stopColor="white" stopOpacity="0.90"/>
+            <stop offset="55%"  stopColor="white" stopOpacity="0.14"/>
             <stop offset="100%" stopColor="white" stopOpacity="0"/>
+          </radialGradient>
+
+          {/* Secondary fill light — opposite side of specular (two-point lighting) */}
+          <radialGradient
+            id="rfsp3"
+            cx={`${100 - spec.cx}%`}
+            cy={`${100 - spec.cy}%`}
+            r="45%"
+          >
+            <stop offset="0%"   stopColor={`rgb(${baseRgb})`} stopOpacity="0.16"/>
+            <stop offset="100%" stopColor={`rgb(${baseRgb})`} stopOpacity="0"/>
           </radialGradient>
 
           {/* Ambient background radial */}
@@ -185,7 +209,8 @@ function Portal({
           filter="url(#rflg)"
         />
 
-        {/* ══ 1. Back arc base strokes (rendered UNDER the sphere) ════ */}
+        {/* ══ 1. Back arc dim base strokes — UNDER SPHERE ═════════════
+            Opacity 0.025 vs front's 0.78 = 31× contrast → convincing 3D depth */}
         {RINGS.map((r, i) => (
           <path
             key={`bb${i}`}
@@ -193,12 +218,12 @@ function Portal({
             fill="none"
             stroke={`rgb(${r.rgb})`}
             strokeWidth={r.sw}
-            strokeOpacity="0.13"
+            strokeOpacity="0.025"
             className="rfrb"
           />
         ))}
 
-        {/* ══ 2. Back arc blurred halo (under sphere) ═════════════════ */}
+        {/* ══ 2. Back arc dim halo — UNDER SPHERE ═════════════════════ */}
         {RINGS.map((r, i) => (
           <path
             key={`bh${i}`}
@@ -206,13 +231,31 @@ function Portal({
             fill="none"
             stroke={`rgb(${r.rgb})`}
             strokeWidth={r.gsw}
-            strokeOpacity="0.05"
+            strokeOpacity="0.025"
             filter="url(#rfmd)"
             className="rfrb"
           />
         ))}
 
-        {/* ══ 3. Sphere drop shadow ════════════════════════════════════ */}
+        {/* ══ 3. Back traveling bright core — UNDER SPHERE ═════════════
+            Masked to top-half (y < PCY). Sphere body naturally occludes
+            whatever portion passes through the sphere's circular footprint.
+            Dim (0.12) — the orbiting dot is barely visible behind the planet. */}
+        {RINGS.map((r, i) => (
+          <ellipse
+            key={`tbd${i}`}
+            cx={PCX} cy={PCY} rx={r.rx} ry={r.ry}
+            fill="none"
+            stroke={`rgb(${r.rgb})`}
+            strokeWidth={r.sw + 0.8}
+            strokeOpacity="0.12"
+            strokeDasharray={`${r.cLen} ${r.cGap}`}
+            className={r.cls}
+            mask="url(#rfBH)"
+          />
+        ))}
+
+        {/* ══ 4. Sphere drop shadow ════════════════════════════════════ */}
         <ellipse
           cx={PCX + 3} cy={PCY + 15}
           rx={46} ry={11}
@@ -221,13 +264,13 @@ function Portal({
           filter="url(#rfmd)"
         />
 
-        {/* ══ 4. Sphere body ═══════════════════════════════════════════ */}
+        {/* ══ 5. Sphere body — fully opaque edge occludes back arcs ════ */}
         <circle cx={PCX} cy={PCY} r={PSR} fill="url(#rfsph)"/>
 
-        {/* ══ 5. Sphere rim edge glow ══════════════════════════════════ */}
+        {/* ══ 6. Sphere rim edge glow ══════════════════════════════════ */}
         <circle cx={PCX} cy={PCY} r={PSR} fill="url(#rfrim)"/>
 
-        {/* ══ 6. Sphere inner structural depth rings ═══════════════════ */}
+        {/* ══ 7. Sphere inner structural depth rings ═══════════════════ */}
         <circle
           cx={PCX} cy={PCY} r={PSR - 9}
           fill="none"
@@ -243,10 +286,14 @@ function Portal({
           strokeOpacity="0.07"
         />
 
-        {/* ══ 7. Specular highlight — tracks mouse ═════════════════════ */}
+        {/* ══ 8. Secondary fill light (rim lighting, opposite specular) */}
+        <circle cx={PCX} cy={PCY} r={PSR} fill="url(#rfsp3)"/>
+
+        {/* ══ 9. Primary specular hot-spot — full sphere tracking ══════ */}
         <circle cx={PCX} cy={PCY} r={PSR} fill="url(#rfsp2)"/>
 
-        {/* ══ 8. Front arc base strokes (rendered ABOVE sphere) ════════ */}
+        {/* ══ 10. Front arc bright base strokes — ABOVE SPHERE ══════════
+             Opacity 0.78 with breathe → ranges 0.39–0.70. 31× brighter than back. */}
         {RINGS.map((r, i) => (
           <path
             key={`fb${i}`}
@@ -254,12 +301,12 @@ function Portal({
             fill="none"
             stroke={`rgb(${r.rgb})`}
             strokeWidth={r.sw}
-            strokeOpacity="0.4"
+            strokeOpacity="0.78"
             className="rfrb"
           />
         ))}
 
-        {/* ══ 9. Front arc blurred halo (above sphere) ═════════════════ */}
+        {/* ══ 11. Front arc bright halo — ABOVE SPHERE ════════════════ */}
         {RINGS.map((r, i) => (
           <path
             key={`fh${i}`}
@@ -267,12 +314,14 @@ function Portal({
             fill="none"
             stroke={`rgb(${r.rgb})`}
             strokeWidth={r.gsw * 1.6}
-            strokeOpacity="0.08"
+            strokeOpacity="0.18"
             filter="url(#rfsm)"
           />
         ))}
 
-        {/* ══ 10. Traveling glow — blurred outer halo (full ellipse) ═══ */}
+        {/* ══ 12. Ambient traveling halo — full ellipse, bloom only ════
+             Very dim (0.08) — creates a luminous trail around the full orbit
+             without revealing the back arc position. */}
         {RINGS.map((r, i) => (
           <ellipse
             key={`tg${i}`}
@@ -280,28 +329,31 @@ function Portal({
             fill="none"
             stroke={`rgb(${r.rgb})`}
             strokeWidth={r.gsw * 2}
-            strokeOpacity="0.22"
+            strokeOpacity="0.08"
             strokeDasharray={`${r.gLen} ${r.gGap}`}
             className={r.cls}
             filter="url(#rfsm)"
           />
         ))}
 
-        {/* ══ 11. Traveling glow — sharp bright core (full ellipse) ════ */}
+        {/* ══ 13. Front traveling bright core — ABOVE SPHERE, MASKED ═══
+             Masked to bottom-half (y >= PCY). Brilliant (0.95).
+             The dot blazes in front, vanishes behind — genuine orbital occlusion. */}
         {RINGS.map((r, i) => (
           <ellipse
-            key={`tc${i}`}
+            key={`tfd${i}`}
             cx={PCX} cy={PCY} rx={r.rx} ry={r.ry}
             fill="none"
             stroke={`rgb(${r.rgb})`}
-            strokeWidth={r.sw + 0.6}
+            strokeWidth={r.sw + 0.8}
             strokeOpacity="0.95"
             strokeDasharray={`${r.cLen} ${r.cGap}`}
             className={r.cls}
+            mask="url(#rfFH)"
           />
         ))}
 
-        {/* ══ 12. Sphere state label ════════════════════════════════════ */}
+        {/* ══ 14. Sphere state label ════════════════════════════════════ */}
         <g filter="url(#rfsm)">
           {sym && (
             <text

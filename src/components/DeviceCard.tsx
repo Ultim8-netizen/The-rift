@@ -1,3 +1,5 @@
+import { useState } from "react";
+import type { MouseEvent } from "react";
 import { Device } from "@/types";
 import { useRiftStore } from "@/store/riftStore";
 
@@ -15,6 +17,11 @@ export function DeviceCard({ device }: { device: Device }) {
   const riftedDevices       = useRiftStore((s) => s.riftedDevices);
   const reconnectingDevices = useRiftStore((s) => s.reconnectingDevices);
   const setDevicePopup      = useRiftStore((s) => s.setDevicePopup);
+
+  // 3D tilt (degrees) and surface-light position (0–100 %)
+  const [tilt,    setTilt]    = useState({ x: 0, y: 0 });
+  const [light,   setLight]   = useState({ x: 50, y: 50 });
+  const [hovered, setHovered] = useState(false);
 
   const isSelected     = selectedDevice?.id === device.id;
   const isRifted       = riftedDevices.includes(device.id);
@@ -61,18 +68,22 @@ export function DeviceCard({ device }: { device: Device }) {
   }
 
   function handleCardClick() {
-    // ── KEY CHANGE ──────────────────────────────────────────────────────────
-    // Single click = immediate select/deselect. No popup required.
-    // This removes the two-step flow (card click → popup → "Select for Transfer")
-    // that left selectedDevice null and the send button permanently disabled.
-    //
-    // Clicking an unselected device: selects it. "Sending to X" shows immediately.
-    // Clicking the already-selected device: opens popup (for info or to deselect).
     if (!isSelected) {
       selectDevice(device);
     } else {
       setDevicePopup(device);
     }
+  }
+
+  function handleMouseMove(e: MouseEvent<HTMLButtonElement>) {
+    const r = e.currentTarget.getBoundingClientRect();
+    // nx/ny: 0..1 across the card surface
+    const nx = (e.clientX - r.left) / r.width;
+    const ny = (e.clientY - r.top)  / r.height;
+    // Tilt: ±12° — (0.5-center) gives range -0.5..0.5, × 24 = ±12°
+    setTilt({ x: (ny - 0.5) * -12, y: (nx - 0.5) * 12 });
+    // Light position: 0–100% across card
+    setLight({ x: nx * 100, y: ny * 100 });
   }
 
   return (
@@ -85,115 +96,167 @@ export function DeviceCard({ device }: { device: Device }) {
         padding: "10px 12px",
         boxShadow: cardShadow,
         backdropFilter: "blur(20px)",
-        transition: "all 0.2s cubic-bezier(0.16, 1, 0.3, 1)",
+        // Required for the light overlay to clip to rounded corners
+        position: "relative",
+        overflow: "hidden",
+        // Perspective tilt — fast while tracking, spring-like on release
+        transform: `perspective(700px) rotateX(${tilt.x}deg) rotateY(${tilt.y}deg)`,
+        transition: hovered
+          ? "transform 0.06s ease-out, box-shadow 0.18s ease"
+          : "transform 0.65s cubic-bezier(0.16, 1, 0.3, 1), background 0.2s ease, box-shadow 0.2s ease",
       }}
       onMouseEnter={(e) => {
+        setHovered(true);
         if (!isSelected) {
           (e.currentTarget as HTMLButtonElement).style.background =
             `rgb(var(--rift-surface2) / 0.7)`;
         }
       }}
+      onMouseMove={handleMouseMove}
       onMouseLeave={(e) => {
+        setTilt({ x: 0, y: 0 });
+        setLight({ x: 50, y: 50 });
+        setHovered(false);
         if (!isSelected) {
           (e.currentTarget as HTMLButtonElement).style.background = cardBg;
         }
       }}
     >
-      <div className="flex items-center gap-2.5">
-        {/* OS tag */}
-        <span
-          className="flex-shrink-0 text-[9px] font-mono font-bold tracking-[0.15em] rounded-lg px-1.5 py-1 leading-none"
-          style={{
-            color: osMeta.color,
-            background: `${osMeta.color.replace("rgb(", "rgba(").replace(")", ", 0.12)")}`.replace("0.8", "0.12"),
-            boxShadow: `0 0 0 1px ${osMeta.color.replace("/ 0.8", "/ 0.2")}`,
-          }}
-        >
-          {osMeta.label}
-        </span>
+      {/* ── Surface light overlay ──────────────────────────────────────
+          A radial gradient that moves with the mouse — simulates a physical
+          light source illuminating the card surface from the cursor position.
+          Three-stop: bright specular core → soft ambient lift → transparent edge. */}
+      <div
+        aria-hidden
+        style={{
+          position: "absolute",
+          inset: 0,
+          borderRadius: "16px",
+          pointerEvents: "none",
+          background: `radial-gradient(circle at ${light.x}% ${light.y}%,
+            rgb(255 255 255 / 0.12) 0%,
+            rgb(255 255 255 / 0.04) 38%,
+            transparent 62%)`,
+          opacity: hovered ? 1 : 0,
+          // Instant on hover (light appears immediately), slow fade on leave
+          transition: hovered ? "opacity 0.08s ease" : "opacity 0.55s ease",
+          zIndex: 0,
+        }}
+      />
 
-        {/* Name + IP */}
-        <div className="flex-1 min-w-0">
-          <p
-            className="text-xs font-semibold truncate leading-tight"
+      {/* ── Accent edge shimmer (Fresnel-like effect) ──────────────────
+          Subtle accent-colored glow at the card edge opposite the light source —
+          simulates light wrapping around the card's physical edge. */}
+      <div
+        aria-hidden
+        style={{
+          position: "absolute",
+          inset: 0,
+          borderRadius: "16px",
+          pointerEvents: "none",
+          background: `radial-gradient(circle at ${100 - light.x}% ${100 - light.y}%,
+            rgb(var(--rift-accent) / 0.06) 0%,
+            transparent 55%)`,
+          opacity: hovered ? 1 : 0,
+          transition: hovered ? "opacity 0.08s ease" : "opacity 0.55s ease",
+          zIndex: 0,
+        }}
+      />
+
+      {/* ── Card content — z-index 1 ensures it renders above overlays ── */}
+      <div style={{ position: "relative", zIndex: 1 }}>
+        <div className="flex items-center gap-2.5">
+          {/* OS tag */}
+          <span
+            className="flex-shrink-0 text-[9px] font-mono font-bold tracking-[0.15em] rounded-lg px-1.5 py-1 leading-none"
             style={{
-              color: isSelected
-                ? "rgb(var(--rift-accent))"
-                : isReconnecting
-                ? "rgb(var(--rift-warning) / 0.85)"
-                : "rgb(var(--rift-text))",
+              color: osMeta.color,
+              background: `${osMeta.color.replace("rgb(", "rgba(").replace(")", ", 0.12)")}`.replace("0.8", "0.12"),
+              boxShadow: `0 0 0 1px ${osMeta.color.replace("/ 0.8", "/ 0.2")}`,
             }}
           >
-            {device.name}
-          </p>
-          <p
-            className="text-[10px] font-mono mt-0.5 truncate"
-            style={{ color: "rgb(var(--rift-muted) / 0.6)" }}
-          >
-            {device.ip}
-          </p>
-        </div>
+            {osMeta.label}
+          </span>
 
-        {/* Right column: status + latency + info button */}
-        <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
-          {/* Status dot */}
-          {isRifted ? (
-            <span className="status-dot-live" />
-          ) : isReconnecting ? (
-            <span className="status-dot-wait" />
-          ) : (
-            <span className="status-dot-offline" />
-          )}
-
-          {/* Latency badge */}
-          {device.latencyMs !== null && (
-            <span
-              className="text-[9px] font-mono rounded-full px-1.5 py-0.5 leading-none"
+          {/* Name + IP */}
+          <div className="flex-1 min-w-0">
+            <p
+              className="text-xs font-semibold truncate leading-tight"
               style={{
-                color: device.latencyMs < 20
-                  ? "rgb(var(--rift-success))"
-                  : device.latencyMs < 60
-                  ? "rgb(var(--rift-warning))"
-                  : "rgb(var(--rift-error))",
-                background: device.latencyMs < 20
-                  ? "rgb(var(--rift-success) / 0.1)"
-                  : device.latencyMs < 60
-                  ? "rgb(var(--rift-warning) / 0.1)"
-                  : "rgb(var(--rift-error) / 0.1)",
-                boxShadow: `0 0 0 1px ${
-                  device.latencyMs < 20
-                    ? "rgb(var(--rift-success) / 0.2)"
-                    : device.latencyMs < 60
-                    ? "rgb(var(--rift-warning) / 0.2)"
-                    : "rgb(var(--rift-error) / 0.2)"
-                }`,
+                color: isSelected
+                  ? "rgb(var(--rift-accent))"
+                  : isReconnecting
+                  ? "rgb(var(--rift-warning) / 0.85)"
+                  : "rgb(var(--rift-text))",
               }}
             >
-              {device.latencyMs}ms
-            </span>
-          )}
+              {device.name}
+            </p>
+            <p
+              className="text-[10px] font-mono mt-0.5 truncate"
+              style={{ color: "rgb(var(--rift-muted) / 0.6)" }}
+            >
+              {device.ip}
+            </p>
+          </div>
+
+          {/* Right column: status + latency */}
+          <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+            {isRifted ? (
+              <span className="status-dot-live" />
+            ) : isReconnecting ? (
+              <span className="status-dot-wait" />
+            ) : (
+              <span className="status-dot-offline" />
+            )}
+
+            {device.latencyMs !== null && (
+              <span
+                className="text-[9px] font-mono rounded-full px-1.5 py-0.5 leading-none"
+                style={{
+                  color: device.latencyMs < 20
+                    ? "rgb(var(--rift-success))"
+                    : device.latencyMs < 60
+                    ? "rgb(var(--rift-warning))"
+                    : "rgb(var(--rift-error))",
+                  background: device.latencyMs < 20
+                    ? "rgb(var(--rift-success) / 0.1)"
+                    : device.latencyMs < 60
+                    ? "rgb(var(--rift-warning) / 0.1)"
+                    : "rgb(var(--rift-error) / 0.1)",
+                  boxShadow: `0 0 0 1px ${
+                    device.latencyMs < 20
+                      ? "rgb(var(--rift-success) / 0.2)"
+                      : device.latencyMs < 60
+                      ? "rgb(var(--rift-warning) / 0.2)"
+                      : "rgb(var(--rift-error) / 0.2)"
+                  }`,
+                }}
+              >
+                {device.latencyMs}ms
+              </span>
+            )}
+          </div>
         </div>
+
+        {isSelected && (
+          <p
+            className="text-[9px] font-mono mt-1.5 tracking-wide"
+            style={{ color: "rgb(var(--rift-accent) / 0.7)" }}
+          >
+            selected · tap again for details
+          </p>
+        )}
+
+        {isReconnecting && !isSelected && (
+          <p
+            className="text-[9px] font-mono mt-1.5 tracking-wide"
+            style={{ color: "rgb(var(--rift-warning) / 0.55)" }}
+          >
+            reconnecting…
+          </p>
+        )}
       </div>
-
-      {/* Selected indicator */}
-      {isSelected && (
-        <p
-          className="text-[9px] font-mono mt-1.5 tracking-wide"
-          style={{ color: "rgb(var(--rift-accent) / 0.7)" }}
-        >
-          selected · tap again for details
-        </p>
-      )}
-
-      {/* Reconnecting label */}
-      {isReconnecting && !isSelected && (
-        <p
-          className="text-[9px] font-mono mt-1.5 tracking-wide"
-          style={{ color: "rgb(var(--rift-warning) / 0.55)" }}
-        >
-          reconnecting…
-        </p>
-      )}
     </button>
   );
 }

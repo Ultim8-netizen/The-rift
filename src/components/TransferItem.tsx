@@ -1,3 +1,5 @@
+import { useState } from "react";
+import type { MouseEvent } from "react";
 import { Transfer } from "@/types";
 
 function fmt(bytes: number): string {
@@ -18,16 +20,20 @@ const STATUS_CONFIG: Record<string, {
   bg: string;
   glow?: string;
 }> = {
-  queued:       { label: "QUEUE",  color: "rgb(var(--rift-muted))",               bg: "rgb(var(--rift-muted) / 0.08)" },
-  connecting:   { label: "CONN",   color: "rgb(var(--rift-warning))",             bg: "rgb(var(--rift-warning) / 0.1)", glow: "0 0 12px rgb(var(--rift-warning) / 0.2)" },
-  transferring: { label: "LIVE",   color: "rgb(var(--rift-accent))",              bg: "rgb(var(--rift-accent) / 0.1)",  glow: "0 0 12px rgb(var(--rift-glow) / 0.25)" },
-  paused:       { label: "PAUSE",  color: "rgb(var(--rift-warning))",             bg: "rgb(var(--rift-warning) / 0.08)" },
-  complete:     { label: "DONE",   color: "rgb(var(--rift-success))",             bg: "rgb(var(--rift-success) / 0.1)", glow: "0 0 10px rgb(var(--rift-success) / 0.2)" },
-  error:        { label: "ERR",    color: "rgb(var(--rift-error))",               bg: "rgb(var(--rift-error) / 0.1)" },
-  declined:     { label: "DENY",   color: "rgb(var(--rift-error) / 0.7)",        bg: "rgb(var(--rift-error) / 0.07)" },
+  queued:       { label: "QUEUE",  color: "rgb(var(--rift-muted))",        bg: "rgb(var(--rift-muted) / 0.08)" },
+  connecting:   { label: "CONN",   color: "rgb(var(--rift-warning))",      bg: "rgb(var(--rift-warning) / 0.1)",  glow: "0 0 12px rgb(var(--rift-warning) / 0.2)" },
+  transferring: { label: "LIVE",   color: "rgb(var(--rift-accent))",       bg: "rgb(var(--rift-accent) / 0.1)",   glow: "0 0 12px rgb(var(--rift-glow) / 0.25)" },
+  paused:       { label: "PAUSE",  color: "rgb(var(--rift-warning))",      bg: "rgb(var(--rift-warning) / 0.08)" },
+  complete:     { label: "DONE",   color: "rgb(var(--rift-success))",      bg: "rgb(var(--rift-success) / 0.1)",  glow: "0 0 10px rgb(var(--rift-success) / 0.2)" },
+  error:        { label: "ERR",    color: "rgb(var(--rift-error))",        bg: "rgb(var(--rift-error) / 0.1)" },
+  declined:     { label: "DENY",   color: "rgb(var(--rift-error) / 0.7)", bg: "rgb(var(--rift-error) / 0.07)" },
 };
 
 export function TransferItem({ transfer }: { transfer: Transfer }) {
+  const [tilt,    setTilt]    = useState({ x: 0, y: 0 });
+  const [light,   setLight]   = useState({ x: 50, y: 50 });
+  const [hovered, setHovered] = useState(false);
+
   const progress =
     transfer.totalBytes > 0
       ? Math.min(100, (transfer.bytesTransferred / transfer.totalBytes) * 100)
@@ -43,14 +49,31 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
       ? transfer.targetDevice?.name
       : transfer.senderDevice?.name;
 
-  const sc = STATUS_CONFIG[transfer.status] ?? STATUS_CONFIG.queued;
+  const sc      = STATUS_CONFIG[transfer.status] ?? STATUS_CONFIG.queued;
   const isActive = transfer.status === "transferring" || transfer.status === "paused";
   const isDone   = transfer.status === "complete";
+
+  function handleMouseMove(e: MouseEvent<HTMLDivElement>) {
+    const r = e.currentTarget.getBoundingClientRect();
+    const nx = (e.clientX - r.left) / r.width;
+    const ny = (e.clientY - r.top)  / r.height;
+    setTilt({ x: (ny - 0.5) * -8, y: (nx - 0.5) * 8 });
+    setLight({ x: nx * 100, y: ny * 100 });
+  }
 
   return (
     <div
       className="rounded-2xl p-3 animate-slide-up"
+      onMouseEnter={() => setHovered(true)}
+      onMouseMove={handleMouseMove}
+      onMouseLeave={() => {
+        setTilt({ x: 0, y: 0 });
+        setLight({ x: 50, y: 50 });
+        setHovered(false);
+      }}
       style={{
+        position: "relative",
+        overflow: "hidden",
         background: `rgb(var(--rift-surface2) / ${isDone ? "0.32" : "0.5"})`,
         backdropFilter: "blur(20px)",
         boxShadow: `
@@ -59,94 +82,141 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
           inset 0 1px 0 rgb(255 255 255 / 0.045)
         `,
         opacity: isDone ? 0.75 : 1,
-        transition: "opacity 0.3s ease",
+        transform: `perspective(600px) rotateX(${tilt.x}deg) rotateY(${tilt.y}deg)`,
+        transition: hovered
+          ? "transform 0.06s ease-out, box-shadow 0.18s ease"
+          : "transform 0.65s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease",
       }}
     >
-      {/* Header */}
-      <div className="flex items-start gap-2 mb-2">
-        {/* Direction badge */}
-        <span
-          className="flex-shrink-0 text-[9px] font-mono font-bold rounded-lg px-1.5 py-1 leading-none mt-0.5"
-          style={{
-            color: transfer.direction === "outgoing"
-              ? "rgb(var(--rift-accent) / 0.85)"
-              : "rgb(var(--rift-accent2) / 0.85)",
-            background: transfer.direction === "outgoing"
-              ? "rgb(var(--rift-accent) / 0.1)"
-              : "rgb(var(--rift-accent2) / 0.1)",
-            boxShadow: transfer.direction === "outgoing"
-              ? "0 0 0 1px rgb(var(--rift-accent) / 0.2)"
-              : "0 0 0 1px rgb(var(--rift-accent2) / 0.2)",
-          }}
-        >
-          {transfer.direction === "outgoing" ? "TX" : "RX"}
-        </span>
+      {/* ── Surface light — moves with cursor, simulates physical illumination ── */}
+      <div
+        aria-hidden
+        style={{
+          position: "absolute",
+          inset: 0,
+          borderRadius: "16px",
+          pointerEvents: "none",
+          zIndex: 0,
+          background: `radial-gradient(circle at ${light.x}% ${light.y}%,
+            rgb(255 255 255 / 0.09) 0%,
+            rgb(255 255 255 / 0.03) 40%,
+            transparent 65%)`,
+          opacity: hovered ? 1 : 0,
+          transition: hovered ? "opacity 0.08s ease" : "opacity 0.55s ease",
+        }}
+      />
 
-        {/* Name + peer */}
-        <div className="flex-1 min-w-0">
-          <p
-            className="text-[11px] font-medium truncate leading-tight"
-            style={{ color: "rgb(var(--rift-text))" }}
+      {/* ── Fresnel edge shimmer — status color bleeds at opposite edge ── */}
+      <div
+        aria-hidden
+        style={{
+          position: "absolute",
+          inset: 0,
+          borderRadius: "16px",
+          pointerEvents: "none",
+          zIndex: 0,
+          background: `radial-gradient(circle at ${100 - light.x}% ${100 - light.y}%,
+            ${sc.color.replace("rgb(", "").replace(")", "")} / 0.07) 0%,
+            transparent 60%)`.replace(
+              `${sc.color.replace("rgb(", "").replace(")", "")} / 0.07)`,
+              `rgb(${sc.color.replace("rgb(var(--rift-", "").replace(") / 0.7)", "").replace(")", "")} / 0.07`
+            ),
+          opacity: hovered ? 1 : 0,
+          transition: hovered ? "opacity 0.08s ease" : "opacity 0.55s ease",
+        }}
+      />
+
+      {/* ── Content — above both overlay layers ── */}
+      <div style={{ position: "relative", zIndex: 1 }}>
+
+        {/* Header row */}
+        <div className="flex items-start gap-2 mb-2">
+
+          {/* Direction badge */}
+          <span
+            className="flex-shrink-0 text-[9px] font-mono font-bold rounded-lg px-1.5 py-1 leading-none mt-0.5"
+            style={{
+              color: transfer.direction === "outgoing"
+                ? "rgb(var(--rift-accent) / 0.85)"
+                : "rgb(var(--rift-accent2) / 0.85)",
+              background: transfer.direction === "outgoing"
+                ? "rgb(var(--rift-accent) / 0.1)"
+                : "rgb(var(--rift-accent2) / 0.1)",
+              boxShadow: transfer.direction === "outgoing"
+                ? "0 0 0 1px rgb(var(--rift-accent) / 0.2)"
+                : "0 0 0 1px rgb(var(--rift-accent2) / 0.2)",
+            }}
           >
-            {label}
-          </p>
-          <p
-            className="text-[10px] font-mono mt-0.5 truncate"
-            style={{ color: "rgb(var(--rift-muted) / 0.6)" }}
+            {transfer.direction === "outgoing" ? "TX" : "RX"}
+          </span>
+
+          {/* Name + peer */}
+          <div className="flex-1 min-w-0">
+            <p
+              className="text-[11px] font-medium truncate leading-tight"
+              style={{ color: "rgb(var(--rift-text))" }}
+            >
+              {label}
+            </p>
+            <p
+              className="text-[10px] font-mono mt-0.5 truncate"
+              style={{ color: "rgb(var(--rift-muted) / 0.6)" }}
+            >
+              {peer ?? "Unknown"} · {fmt(transfer.totalBytes)}
+            </p>
+          </div>
+
+          {/* Status badge */}
+          <span
+            className="text-[9px] font-mono font-bold rounded-full px-2 py-0.5 flex-shrink-0"
+            style={{
+              color: sc.color,
+              background: sc.bg,
+              boxShadow: sc.glow ?? "none",
+            }}
           >
-            {peer ?? "Unknown"} · {fmt(transfer.totalBytes)}
-          </p>
+            {sc.label}
+          </span>
         </div>
 
-        {/* Status badge */}
-        <span
-          className="text-[9px] font-mono font-bold rounded-full px-2 py-0.5 flex-shrink-0"
-          style={{
-            color: sc.color,
-            background: sc.bg,
-            boxShadow: sc.glow ?? "none",
-          }}
-        >
-          {sc.label}
-        </span>
+        {/* Progress bar — only during active transfer */}
+        {isActive && (
+          <div className="mt-2">
+            <div className="progress-bar-track w-full h-1">
+              <div
+                className="progress-bar-fill"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+            <div className="flex justify-between mt-1.5">
+              <span
+                className="text-[9px] font-mono"
+                style={{ color: "rgb(var(--rift-muted) / 0.55)" }}
+              >
+                {fmt(transfer.bytesTransferred)} / {fmt(transfer.totalBytes)}
+              </span>
+              <span
+                className="text-[9px] font-mono"
+                style={{ color: "rgb(var(--rift-muted) / 0.55)" }}
+              >
+                {fmt(transfer.speedBytesPerSec)}/s
+                {transfer.etaSeconds !== null && ` · ${fmtEta(transfer.etaSeconds)}`}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Error message */}
+        {transfer.status === "error" && transfer.errorMessage && (
+          <p
+            className="text-[10px] font-mono mt-1.5 leading-snug"
+            style={{ color: "rgb(var(--rift-error) / 0.75)" }}
+          >
+            {transfer.errorMessage}
+          </p>
+        )}
+
       </div>
-
-      {/* Progress bar */}
-      {isActive && (
-        <div className="mt-2">
-          <div className="progress-bar-track w-full h-1">
-            <div
-              className="progress-bar-fill"
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-          <div className="flex justify-between mt-1.5">
-            <span
-              className="text-[9px] font-mono"
-              style={{ color: "rgb(var(--rift-muted) / 0.55)" }}
-            >
-              {fmt(transfer.bytesTransferred)} / {fmt(transfer.totalBytes)}
-            </span>
-            <span
-              className="text-[9px] font-mono"
-              style={{ color: "rgb(var(--rift-muted) / 0.55)" }}
-            >
-              {fmt(transfer.speedBytesPerSec)}/s
-              {transfer.etaSeconds !== null && ` · ${fmtEta(transfer.etaSeconds)}`}
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* Error message */}
-      {transfer.status === "error" && transfer.errorMessage && (
-        <p
-          className="text-[10px] font-mono mt-1.5 leading-snug"
-          style={{ color: "rgb(var(--rift-error) / 0.75)" }}
-        >
-          {transfer.errorMessage}
-        </p>
-      )}
     </div>
   );
 }
