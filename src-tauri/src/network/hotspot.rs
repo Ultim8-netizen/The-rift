@@ -86,6 +86,7 @@ async fn detect_running_hotspot(ssid: &str, password: &str) -> Option<HotspotInf
 
 /// Public entry point for the `detect_hotspot` Tauri command.
 /// Called when the user clicks "Detect Active Hotspot" after manual setup.
+/// Returns None on all non-Windows platforms.
 pub async fn detect_hotspot_active() -> Option<HotspotInfo> {
     #[cfg(target_os = "windows")]
     {
@@ -489,11 +490,6 @@ pub async fn connect_to_hotspot(_ssid: &str, _password: &str) -> anyhow::Result<
     )
 }
 
-#[cfg(target_os = "android")]
-pub async fn detect_hotspot_active() -> Option<HotspotInfo> {
-    None
-}
-
 // ── macOS / Linux stubs ───────────────────────────────────────────────────────
 
 #[cfg(not(any(target_os = "windows", target_os = "android")))]
@@ -509,9 +505,4 @@ pub async fn stop_hotspot() -> anyhow::Result<()> {
 #[cfg(not(any(target_os = "windows", target_os = "android")))]
 pub async fn connect_to_hotspot(_ssid: &str, _password: &str) -> anyhow::Result<HotspotInfo> {
     anyhow::bail!("Hotspot joining automation is currently Windows-only.")
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "android")))]
-pub async fn detect_hotspot_active() -> Option<HotspotInfo> {
-    None
 }

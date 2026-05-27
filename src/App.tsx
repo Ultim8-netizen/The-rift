@@ -2,6 +2,8 @@ import { useEffect } from "react";
 import { useDevices } from "@/hooks/useDevices";
 import { useTransferEvents } from "@/hooks/useTransfer";
 import { useTheme } from "@/hooks/useTheme";
+import { useMobile } from "@/hooks/useMobile";
+import { MobileLayout } from "@/components/MobileLayout";
 import { DeviceList } from "@/components/DeviceList";
 import { DropZone } from "@/components/DropZone";
 import { TransferQueue } from "@/components/TransferQueue";
@@ -21,8 +23,8 @@ export default function App() {
   useDevices();
   useTransferEvents();
 
-  // First-launch tour: fire after the layout has settled so data-tour
-  // elements are in the DOM and getBoundingClientRect returns real values.
+  const isMobile = useMobile();
+
   useEffect(() => {
     const t = setTimeout(() => {
       if (!localStorage.getItem(TOUR_SEEN_KEY)) {
@@ -32,68 +34,55 @@ export default function App() {
     return () => clearTimeout(t);
   }, []);
 
+  // Mobile: full-screen bottom-tab layout
+  if (isMobile) {
+    return <MobileLayout />;
+  }
+
+  // Desktop: three-panel layout unchanged
   return (
     <div
       className="h-screen overflow-hidden font-sans text-rift-text relative select-none"
       style={{ background: "rgb(var(--rift-bg))" }}
     >
-      {/* ── Animated ambient light field ── */}
-      <div
-        aria-hidden
-        className="absolute inset-0 pointer-events-none overflow-hidden"
-        style={{ zIndex: 0 }}
-      >
+      {/* Ambient light orbs */}
+      <div aria-hidden className="absolute inset-0 pointer-events-none overflow-hidden" style={{ zIndex: 0 }}>
         <div
           className="ambient-orb animate-orb-drift-a"
           style={{
-            width: "55vw",
-            height: "55vw",
-            top: "-20%",
-            left: "-15%",
-            background: `radial-gradient(ellipse at center, rgb(var(--rift-accent) / 0.055) 0%, transparent 70%)`,
+            width: "55vw", height: "55vw", top: "-20%", left: "-15%",
+            background: "radial-gradient(ellipse at center, rgb(var(--rift-accent) / 0.055) 0%, transparent 70%)",
           }}
         />
         <div
           className="ambient-orb animate-orb-drift-b"
           style={{
-            width: "50vw",
-            height: "50vw",
-            bottom: "-20%",
-            right: "-12%",
-            background: `radial-gradient(ellipse at center, rgb(var(--rift-accent2) / 0.05) 0%, transparent 70%)`,
+            width: "50vw", height: "50vw", bottom: "-20%", right: "-12%",
+            background: "radial-gradient(ellipse at center, rgb(var(--rift-accent2) / 0.05) 0%, transparent 70%)",
           }}
         />
         <div
           className="ambient-orb animate-orb-drift-c"
           style={{
-            width: "35vw",
-            height: "35vw",
-            top: "30%",
-            left: "35%",
-            background: `radial-gradient(ellipse at center, rgb(var(--rift-accent) / 0.028) 0%, transparent 70%)`,
+            width: "35vw", height: "35vw", top: "30%", left: "35%",
+            background: "radial-gradient(ellipse at center, rgb(var(--rift-accent) / 0.028) 0%, transparent 70%)",
           }}
         />
       </div>
 
-      {/* ── Main layout ── */}
-      <div
-        className="relative flex h-full gap-2.5 p-2.5 pb-14"
-        style={{ zIndex: 1 }}
-      >
+      {/* Main layout */}
+      <div className="relative flex h-full gap-2.5 p-2.5 pb-14" style={{ zIndex: 1 }}>
         <DeviceList />
         <DropZone />
         <TransferQueue />
       </div>
 
-      {/* ── Floating status pill ── */}
-      <div
-        className="absolute bottom-0 left-0 right-0 flex justify-center pb-2.5 px-3"
-        style={{ zIndex: 2 }}
-      >
+      {/* Floating status bar */}
+      <div className="absolute bottom-0 left-0 right-0 flex justify-center pb-2.5 px-3" style={{ zIndex: 2 }}>
         <StatusBar />
       </div>
 
-      {/* ── Overlays ── */}
+      {/* Overlays */}
       <AcceptDialog />
       <DevicePopup />
       <ThemeSelector />
@@ -101,8 +90,6 @@ export default function App() {
       <TextTransferPanel />
       <IncomingTextDialog />
       <HelpPage />
-
-      {/* Tour renders above everything at z-200 */}
       <TourOverlay />
     </div>
   );
