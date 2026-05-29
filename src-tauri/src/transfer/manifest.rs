@@ -8,15 +8,22 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 
-pub const DEFAULT_CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MB
+/// 512 KB — optimal for a local WiFi hotspot link.
+///
+/// 4 MB was tuned for high-latency internet paths where round-trip cost is
+/// high.  On a direct hotspot with ~2 ms RTT a 512 KB chunk completes in
+/// ~50 ms at 10 MB/s, giving finer-grained progress, faster NACK-retry cycles,
+/// and better interleaving across four concurrent workers without meaningfully
+/// impacting throughput.
+pub const DEFAULT_CHUNK_SIZE: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SenderDevice {
-    pub id: String,
+    pub id:   String,
     pub name: String,
-    pub os: String,
-    pub ip: String,
+    pub os:   String,
+    pub ip:   String,
     pub port: u16,
 }
 
@@ -25,11 +32,11 @@ pub struct SenderDevice {
 #[serde(rename_all = "camelCase")]
 pub struct ChunkInfo {
     /// Sequential index within the file (0-based).
-    pub id: usize,
+    pub id:     usize,
     /// Byte offset of this chunk within the assembled file.
     pub offset: u64,
     /// Number of bytes in this chunk (last chunk may be smaller).
-    pub size: u64,
+    pub size:   u64,
     /// BLAKE3 hex digest of the raw chunk bytes.
     pub blake3: String,
 }
@@ -37,42 +44,42 @@ pub struct ChunkInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileManifest {
-    pub name: String,
-    pub total_bytes: u64,
+    pub name:         String,
+    pub total_bytes:  u64,
     pub total_chunks: usize,
     /// BLAKE3 hex digest of the complete assembled file.
-    pub file_blake3: String,
-    pub chunks: Vec<ChunkInfo>,
+    pub file_blake3:  String,
+    pub chunks:       Vec<ChunkInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferManifest {
-    pub transfer_id: String,
+    pub transfer_id:   String,
     pub sender_device: SenderDevice,
-    pub files: Vec<FileManifest>,
-    pub total_bytes: u64,
+    pub files:         Vec<FileManifest>,
+    pub total_bytes:   u64,
     /// Number of concurrent worker streams the sender will open per file.
-    /// The receiver uses this for failure detection only (not for finalization
-    /// gating — finalization is triggered by chunk count).
-    pub num_streams: usize,
+    /// The receiver uses this for failure detection only — finalization is
+    /// triggered by chunk completeness, not stream count.
+    pub num_streams:   usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResumeManifest {
-    pub transfer_id: String,
+    pub transfer_id:       String,
     /// One Vec<usize> per file; each entry is a completed chunk ID.
     pub completed_per_file: Vec<Vec<usize>>,
 }
 
 pub async fn build_manifest(
-    transfer_id: String,
+    transfer_id:   String,
     sender_device: SenderDevice,
-    file_entries: &[(String, String, u64)], // (name, path, size_bytes)
-    num_streams: usize,
+    file_entries:  &[(String, String, u64)], // (name, path, size_bytes)
+    num_streams:   usize,
 ) -> anyhow::Result<TransferManifest> {
-    let mut files = Vec::with_capacity(file_entries.len());
+    let mut files       = Vec::with_capacity(file_entries.len());
     let mut total_bytes = 0u64;
 
     for (name, path, size_bytes) in file_entries {
@@ -81,42 +88,35 @@ pub async fn build_manifest(
         files.push(fm);
     }
 
-    Ok(TransferManifest {
-        transfer_id,
-        sender_device,
-        files,
-        total_bytes,
-        num_streams,
-    })
+    Ok(TransferManifest { transfer_id, sender_device, files, total_bytes, num_streams })
 }
 
 async fn build_file_manifest(
-    name: &str,
-    path: &str,
+    name:       &str,
+    path:       &str,
     size_bytes: u64,
 ) -> anyhow::Result<FileManifest> {
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|e| anyhow::anyhow!("Cannot open {path}: {e}"))?;
 
-    let chunk_size = DEFAULT_CHUNK_SIZE;
-    let total_chunks =
-        ((size_bytes as usize).saturating_add(chunk_size - 1)) / chunk_size;
+    let chunk_size   = DEFAULT_CHUNK_SIZE;
+    let total_chunks = ((size_bytes as usize).saturating_add(chunk_size - 1)) / chunk_size;
     let total_chunks = total_chunks.max(1);
 
-    let mut chunks = Vec::with_capacity(total_chunks);
+    let mut chunks      = Vec::with_capacity(total_chunks);
     let mut full_hasher = blake3::Hasher::new();
-    let mut offset = 0u64;
+    let mut offset      = 0u64;
 
     for ci in 0..total_chunks {
-        // Use a fill-loop instead of a bare `read()` call.
-        // A single `AsyncReadExt::read` may legally return fewer bytes than
-        // the buffer even for a local file; the loop ensures we always get a
-        // full chunk (or everything up to EOF for the last chunk).
-        let mut buf = vec![0u8; chunk_size];
+        // Fill-loop: a single AsyncReadExt::read call may legally return fewer
+        // bytes than requested even on a local file.
+        let mut buf        = vec![0u8; chunk_size];
         let mut total_read = 0usize;
         while total_read < chunk_size {
-            match file.read(&mut buf[total_read..]).await
+            match file
+                .read(&mut buf[total_read..])
+                .await
                 .map_err(|e| anyhow::anyhow!("Read error at chunk {ci}: {e}"))?
             {
                 0 => break, // EOF
@@ -133,9 +133,9 @@ async fn build_file_manifest(
         full_hasher.update(&buf);
 
         chunks.push(ChunkInfo {
-            id: ci,
+            id:     ci,
             offset,
-            size: total_read as u64,
+            size:   total_read as u64,
             blake3: chunk_blake3,
         });
 
@@ -145,8 +145,8 @@ async fn build_file_manifest(
     let file_blake3 = hex::encode(full_hasher.finalize().as_bytes());
 
     Ok(FileManifest {
-        name: name.to_string(),
-        total_bytes: size_bytes,
+        name:         name.to_string(),
+        total_bytes:  size_bytes,
         total_chunks: chunks.len(),
         file_blake3,
         chunks,
