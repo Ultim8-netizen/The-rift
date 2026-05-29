@@ -2,45 +2,38 @@ import { useRiftStore } from "@/store/riftStore";
 import { useInvoke } from "@/hooks/useTauri";
 import { DeviceCard } from "./DeviceCard";
 
-// ── 3D Scan Animation constants (module-level, computed once) ─────────────────
-const SCX = 75;   // SVG center x
-const SCY = 48;   // SVG center y (slightly above midpoint for visual weight)
-const SRX = 64;   // Maximum ring rx
-const SRY = 23;   // Maximum ring ry — ratio 0.359 ≈ 21° elevation angle
-// This ratio makes the ellipses look like concentric circles on a
-// horizontal plane seen from ~21° above the horizon.
+const SCX = 75;
+const SCY = 48;
+const SRX = 64;
+const SRY = 23;
 
-// CSS keyframes injected into the SVG — using unique names to avoid doc conflicts.
-// s3dOut: expand → hit boundary → bounce back slightly → secondary spread → fade
-// s3dBeacon: the center dot pulses
-// s3dPlane: the static reference ellipses breathe very gently
+// Slowed way down: 8s base, 4-ripple stagger at 2s each = full 8s cycle
+// The bounce-back and secondary spread are kept but stretched in time.
+// Result: a calm, breathing sonar feel instead of a rushed radar sweep.
 const SCAN_CSS = `
   @keyframes s3dOut {
     0%   { transform: scale(0.04); opacity: 0;    }
-    8%   { opacity: 0.9;                           }
-    44%  { transform: scale(1);    opacity: 0.85;  }
-    55%  { transform: scale(0.88); opacity: 0.72;  }
-    67%  { transform: scale(1.07); opacity: 0.46;  }
-    100% { transform: scale(1.32); opacity: 0;     }
+    8%   { opacity: 0.85;                          }
+    44%  { transform: scale(1);    opacity: 0.78;  }
+    55%  { transform: scale(0.9);  opacity: 0.62;  }
+    70%  { transform: scale(1.06); opacity: 0.38;  }
+    100% { transform: scale(1.28); opacity: 0;     }
   }
   @keyframes s3dBeacon {
-    0%, 100% { opacity: 0.4;  transform: scale(1);   }
-    50%       { opacity: 1.0;  transform: scale(1.4); }
+    0%, 100% { opacity: 0.35; transform: scale(1);    }
+    50%       { opacity: 0.95; transform: scale(1.35); }
   }
   @keyframes s3dPlane {
     0%, 100% { opacity: 0.07; }
-    50%       { opacity: 0.14; }
+    50%       { opacity: 0.13; }
   }
   @keyframes s3dBloom {
-    0%, 100% { opacity: 0.06; }
-    50%       { opacity: 0.16; }
+    0%, 100% { opacity: 0.05; }
+    50%       { opacity: 0.14; }
   }
 `;
 
 function ScanAnimation3D() {
-  // Each ripple group: 3 elements (back arc dim, ambient halo, front arc bright)
-  // All three share the same CSS scale animation so they expand together as one ring.
-  // front/back split via SVG masks — creates the tilted-plane 3D illusion.
   const ripples = [0, 1, 2, 3];
 
   return (
@@ -49,84 +42,73 @@ function ScanAnimation3D() {
         <svg
           width={150}
           height={96}
-          viewBox={`0 0 150 96`}
+          viewBox="0 0 150 96"
           style={{ overflow: "visible" }}
         >
           <style>{SCAN_CSS}</style>
           <defs>
-            {/* Front hemisphere mask: bottom half of SVG = front of 3D plane */}
             <mask id="s3dF">
               <rect x="0" y={SCY} width="150" height="96" fill="white"/>
             </mask>
-            {/* Back hemisphere mask: top half of SVG = back of 3D plane */}
             <mask id="s3dB">
               <rect x="0" y="0" width="150" height={SCY} fill="white"/>
             </mask>
-            {/* Soft glow filter for halos */}
             <filter id="s3dG" x="-80%" y="-80%" width="260%" height="260%">
               <feGaussianBlur in="SourceGraphic" stdDeviation="4.5"/>
             </filter>
-            {/* Large bloom for center beacon */}
             <filter id="s3dL" x="-200%" y="-200%" width="500%" height="500%">
               <feGaussianBlur in="SourceGraphic" stdDeviation="14"/>
             </filter>
           </defs>
 
-          {/* ── Static reference rings — establish the 3D ground plane ── */}
-          {/* Outer boundary ring — the "wall" the ripples bounce off */}
+          {/* Static reference rings */}
           <ellipse cx={SCX} cy={SCY} rx={SRX} ry={SRY}
             fill="none" strokeWidth="0.6" strokeOpacity="0"
-            style={{ stroke: "rgb(0,200,255)", animation: "s3dPlane 3s ease-in-out infinite" }}/>
-          {/* Front half of boundary ring (brighter = closer) */}
+            style={{ stroke: "rgb(0,200,255)", animation: "s3dPlane 6s ease-in-out infinite" }}/>
           <ellipse cx={SCX} cy={SCY} rx={SRX} ry={SRY}
             fill="none" strokeWidth="0.6" strokeOpacity="0.22"
             mask="url(#s3dF)"
-            style={{ stroke: "rgb(0,200,255)", animation: "s3dPlane 3s ease-in-out infinite" }}/>
+            style={{ stroke: "rgb(0,200,255)", animation: "s3dPlane 6s ease-in-out infinite" }}/>
           <ellipse cx={SCX} cy={SCY} rx={SRX} ry={SRY}
             fill="none" strokeWidth="0.4" strokeOpacity="0.08"
             mask="url(#s3dB)"
-            style={{ stroke: "rgb(0,200,255)", animation: "s3dPlane 3s ease-in-out infinite" }}/>
+            style={{ stroke: "rgb(0,200,255)", animation: "s3dPlane 6s ease-in-out infinite" }}/>
 
-          {/* Mid reference ring */}
           <ellipse cx={SCX} cy={SCY} rx={SRX * 0.6} ry={SRY * 0.6}
             fill="none" strokeWidth="0.4" strokeOpacity="0.14"
             mask="url(#s3dF)"
-            style={{ stroke: "rgb(0,200,255)", animation: "s3dPlane 3s ease-in-out 0.5s infinite" }}/>
+            style={{ stroke: "rgb(0,200,255)", animation: "s3dPlane 6s ease-in-out 1s infinite" }}/>
           <ellipse cx={SCX} cy={SCY} rx={SRX * 0.6} ry={SRY * 0.6}
             fill="none" strokeWidth="0.3" strokeOpacity="0.05"
             mask="url(#s3dB)"
-            style={{ stroke: "rgb(0,200,255)", animation: "s3dPlane 3s ease-in-out 0.5s infinite" }}/>
+            style={{ stroke: "rgb(0,200,255)", animation: "s3dPlane 6s ease-in-out 1s infinite" }}/>
 
-          {/* Inner reference ring */}
           <ellipse cx={SCX} cy={SCY} rx={SRX * 0.3} ry={SRY * 0.3}
             fill="none" strokeWidth="0.3" strokeOpacity="0.08"
             mask="url(#s3dF)"
-            style={{ stroke: "rgb(0,200,255)", animation: "s3dPlane 3s ease-in-out 1s infinite" }}/>
+            style={{ stroke: "rgb(0,200,255)", animation: "s3dPlane 6s ease-in-out 2s infinite" }}/>
 
-          {/* ── 4 staggered outward ripples ──────────────────────────── */}
+          {/* 4 staggered ripples — 8s duration, 2s apart = smooth continuous wave */}
           {ripples.map((i) => (
             <g
               key={i}
               style={{
-                // transform-box fill-box + 50%/50% origin = scales around ellipse center
                 transformBox: "fill-box",
                 transformOrigin: "50% 50%",
-                animation: `s3dOut 3.6s cubic-bezier(0.4,0,0.6,1) ${(-i * 0.9).toFixed(1)}s infinite`,
+                // 8s per ripple, staggered by 2s (8/4 = 2s per slot)
+                animation: `s3dOut 8s cubic-bezier(0.4,0,0.6,1) ${(-i * 2).toFixed(1)}s infinite`,
               }}
             >
-              {/* Ambient halo — full ellipse, very dim, creates bloom trail */}
               <ellipse cx={SCX} cy={SCY} rx={SRX} ry={SRY}
                 fill="none" strokeWidth="14" strokeOpacity="0.06"
                 filter="url(#s3dG)"
                 style={{ stroke: "rgb(0,200,255)" }}
               />
-              {/* Back arc (dim) — top half, receding, physically "behind" the plane */}
               <ellipse cx={SCX} cy={SCY} rx={SRX} ry={SRY}
                 fill="none" strokeWidth="1" strokeOpacity="0.18"
                 mask="url(#s3dB)"
                 style={{ stroke: "rgb(0,200,255)" }}
               />
-              {/* Front arc (bright) — bottom half, approaching, physically "in front" */}
               <ellipse cx={SCX} cy={SCY} rx={SRX} ry={SRY}
                 fill="none" strokeWidth="1.8" strokeOpacity="0.92"
                 mask="url(#s3dF)"
@@ -135,26 +117,23 @@ function ScanAnimation3D() {
             </g>
           ))}
 
-          {/* ── Center beacon ─────────────────────────────────────────── */}
-          {/* Bloom */}
+          {/* Center beacon — slowed breathing */}
           <ellipse cx={SCX} cy={SCY} rx={22} ry={8}
             fill="rgb(0,200,255)" fillOpacity="0.06"
             filter="url(#s3dL)"
-            style={{ animation: "s3dBloom 2.4s ease-in-out infinite" }}
+            style={{ animation: "s3dBloom 4s ease-in-out infinite" }}
           />
-          {/* Soft halo ring around beacon */}
           <circle cx={SCX} cy={SCY} r="10"
             fill="none" stroke="rgb(0,200,255)" strokeWidth="6" strokeOpacity="0.06"
             filter="url(#s3dG)"
-            style={{ animation: "s3dBeacon 2s ease-in-out infinite" }}
+            style={{ animation: "s3dBeacon 4s ease-in-out infinite" }}
           />
-          {/* Beacon dot */}
           <circle cx={SCX} cy={SCY} r="3"
             fill="rgb(0,200,255)" fillOpacity="0.85"
             style={{
               transformBox: "fill-box",
               transformOrigin: "50% 50%",
-              animation: "s3dBeacon 2s ease-in-out infinite",
+              animation: "s3dBeacon 4s ease-in-out infinite",
             }}
           />
         </svg>

@@ -15,8 +15,8 @@ function fmt(bytes: number): string {
   return `${parseFloat((bytes / k ** i).toFixed(1))} ${s[i]}`;
 }
 
-// ── Portal geometry (module-level) ────────────────────────────────────────────
-const PCX = 150, PCY = 150, PSR = 52;
+// ── Portal geometry ───────────────────────────────────────────────────────────
+const PCX = 150, PCY = 150, PSR = 58;
 
 function ellipsePerim(rx: number, ry: number): number {
   const h = ((rx - ry) / (rx + ry)) ** 2;
@@ -26,16 +26,13 @@ function ellipsePerim(rx: number, ry: number): number {
 interface RingSpec {
   rx: number; ry: number; rgb: string;
   dur: string; delay: string; sw: number; gsw: number;
+  tiltX: number; // how much the ring plane tilts (visual inclination)
 }
 
-// Dramatically different inclinations for genuine 3D depth:
-// Ring 0 — near-equatorial (ratio 8.4:1, flat disc)
-// Ring 1 — mid-inclined   (ratio 1.7:1, 45° tilt)
-// Ring 2 — near-polar     (ratio ~1:1, almost circular)
 const BASE_RINGS: RingSpec[] = [
-  { rx: 118, ry: 14,  rgb: "0,200,255",   dur: "5.5s",  delay: "0s",    sw: 1.2, gsw: 10 },
-  { rx: 85,  ry: 50,  rgb: "130,75,255",  dur: "8.4s",  delay: "-2.6s", sw: 1.5, gsw: 12 },
-  { rx: 62,  ry: 61,  rgb: "170,210,255", dur: "11.2s", delay: "-5.8s", sw: 1.8, gsw: 14 },
+  { rx: 118, ry: 14,  rgb: "0,200,255",   dur: "5.5s",  delay: "0s",    sw: 1.2, gsw: 10, tiltX: 0 },
+  { rx: 85,  ry: 50,  rgb: "130,75,255",  dur: "8.4s",  delay: "-2.6s", sw: 1.5, gsw: 12, tiltX: 0 },
+  { rx: 62,  ry: 61,  rgb: "170,210,255", dur: "11.2s", delay: "-5.8s", sw: 1.8, gsw: 14, tiltX: 0 },
 ];
 
 const RINGS = BASE_RINGS.map((r, i) => {
@@ -45,13 +42,11 @@ const RINGS = BASE_RINGS.map((r, i) => {
   return { ...r, C, gLen, gGap: C - gLen, cLen, cGap: C - cLen, cls: `rfrt${i}` };
 });
 
-// Half-arc path generators — back = top half (y < PCY), front = bottom half (y >= PCY)
 const bArc = (rx: number, ry: number) =>
   `M ${PCX + rx},${PCY} A ${rx},${ry} 0 0,1 ${PCX - rx},${PCY}`;
 const fArc = (rx: number, ry: number) =>
   `M ${PCX - rx},${PCY} A ${rx},${ry} 0 0,1 ${PCX + rx},${PCY}`;
 
-// CSS: dashoffset animation per ring + breathe for base strokes
 const RING_CSS =
   RINGS.map((r) =>
     `.${r.cls}{animation:${r.cls}kf ${r.dur} linear infinite ${r.delay}}` +
@@ -60,8 +55,108 @@ const RING_CSS =
   `.rfrb{animation:rfbreath 4.5s ease-in-out infinite}` +
   `@keyframes rfbreath{0%,100%{opacity:.5}50%{opacity:.9}}`;
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Sphere physics ────────────────────────────────────────────────────────────
+// Given a normalized light direction (lx, ly) in [-1,1] x [-1,1] where
+// (0,0) = center, compute all the gradient stops for physically-correct shading.
+//
+// The sphere surface normal at a point p = (px, py) on the disc is:
+//   N = (px, py, sqrt(1 - px^2 - py^2))  (unit sphere)
+//
+// Lambertian diffuse: max(0, dot(N, L)) where L = (lx, ly, lz)
+// Specular (Phong): pow(max(0, dot(R, V)), shininess)  where V = (0,0,1) (viewer)
+// Fresnel rim: pow(1 - dot(N, V), 4) ≈ edge brightening
+//
+// For SVG we bake these into radial gradient positions and opacity values.
 
+interface SphereShading {
+  // Diffuse: large soft radial from the lit side
+  diffuseCx: number; diffuseCy: number;
+  diffuseR: number;
+  diffuseOpacity: number;
+
+  // Specular highlight: tight hot spot
+  specCx: number; specCy: number;
+  specR: number;
+  specOpacity: number;
+
+  // Secondary fill (bounce light, opposite side)
+  fillCx: number; fillCy: number;
+  fillR: number;
+  fillOpacity: number;
+
+  // Rim: accent color bleed at the silhouette opposite the light
+  rimOpacity: number;
+
+  // Ambient occlusion darkening at the very bottom
+  aoOpacity: number;
+
+  // Dark side shadow on sphere body
+  shadowCx: number; shadowCy: number;
+}
+
+function computeShading(
+  // nx, ny: normalized mouse position, -1..1
+  nx: number, ny: number,
+): SphereShading {
+  // Light elevation: always 30° above horizon so sphere reads as lit even
+  // when mouse is at screen center. Light z is always positive.
+  const lz = 0.6;
+  const scale = Math.sqrt(1 - lz * lz) / Math.max(0.001, Math.sqrt(nx * nx + ny * ny) || 1);
+  const lx = nx * scale;
+  const ly = ny * scale;
+  // Renormalize
+  const lLen = Math.sqrt(lx * lx + ly * ly + lz * lz);
+  const lxn = lx / lLen, lyn = ly / lLen, lzn = lz / lLen;
+
+  // Specular position: the reflection of the viewer direction (0,0,1) about L
+  // For a sphere, the highlight appears at the point on the visible hemisphere
+  // where N = normalize(L + V) = normalize(L + (0,0,1))
+  const hx = lxn, hy = lyn, hz = lzn + 1;
+  const hLen = Math.sqrt(hx * hx + hy * hy + hz * hz);
+  const hxn = hx / hLen, hyn = hy / hLen;
+
+  // Map to SVG space: center (PCX, PCY) ± PSR
+  const specCx = PCX + hxn * PSR * 0.72;
+  const specCy = PCY + hyn * PSR * 0.72;
+
+  // Diffuse center: lit side, offset toward light
+  const diffuseCx = PCX + lxn * PSR * 0.38;
+  const diffuseCy = PCY + lyn * PSR * 0.38;
+
+  // Fill light: opposite side, very dim
+  const fillCx = PCX - lxn * PSR * 0.55;
+  const fillCy = PCY - lyn * PSR * 0.55;
+
+  // Shadow center: the dark side (opposite of lit)
+  const shadowCx = PCX - lxn * PSR * 0.3;
+  const shadowCy = PCY - lyn * PSR * 0.3;
+
+  // Intensities based on light angle
+  const diffuseStrength = 0.55 + 0.2 * lzn;
+  const specStrength = 0.88;
+  const fillStrength = 0.08 + 0.04 * (1 - lzn);
+
+  return {
+    diffuseCx, diffuseCy,
+    diffuseR: PSR * 1.05,
+    diffuseOpacity: diffuseStrength,
+
+    specCx, specCy,
+    specR: PSR * 0.28,
+    specOpacity: specStrength,
+
+    fillCx, fillCy,
+    fillR: PSR * 0.9,
+    fillOpacity: fillStrength,
+
+    rimOpacity: 0.22 + 0.08 * (1 - Math.abs(lzn)),
+    aoOpacity: 0.35,
+
+    shadowCx, shadowCy,
+  };
+}
+
+// ── Portal component ──────────────────────────────────────────────────────────
 function Portal({
   dragging,
   hasFiles,
@@ -72,29 +167,28 @@ function Portal({
   isSending: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [tilt, setTilt] = useState({ x: 0, y: 0 });
-  // spec.cx/cy: 0–100 percentages, now covering the full sphere surface
-  const [spec, setSpec] = useState({ cx: 50, cy: 50 });
+
+  // Mouse-driven light direction: normalized -1..1
+  const [light, setLight] = useState({ nx: -0.4, ny: -0.6 });
 
   const state    = dragging ? "drop" : isSending ? "send" : hasFiles ? "ready" : "idle";
   const baseRgb  = state === "send" ? "130,75,255" : "0,200,255";
   const ambAlpha = dragging ? 0.22 : state === "ready" ? 0.12 : 0.065;
-  const isRest   = tilt.x === 0 && tilt.y === 0;
+
+  const shading = computeShading(light.nx, light.ny);
 
   function onMouseMove(e: MouseEvent<HTMLDivElement>) {
     const r = containerRef.current?.getBoundingClientRect();
     if (!r) return;
-    const nx = (e.clientX - r.left - r.width  / 2) / (r.width  / 2); // -1..1
-    const ny = (e.clientY - r.top  - r.height / 2) / (r.height / 2); // -1..1
-    // Increased tilt range from ±13° to ±22° for more dramatic 3D
-    setTilt({ x: ny * -22, y: nx * 22 });
-    // Full sphere coverage: spec ranges 6%–94% instead of the old narrow 23%–49%
-    setSpec({ cx: 50 + nx * 44, cy: 50 + ny * 44 });
+    // Convert to -1..1 over the sphere's bounding box
+    const nx = ((e.clientX - r.left) / r.width  - 0.5) * 2;
+    const ny = ((e.clientY - r.top)  / r.height - 0.5) * 2;
+    setLight({ nx, ny });
   }
 
   function onMouseLeave() {
-    setTilt({ x: 0, y: 0 });
-    setSpec({ cx: 50, cy: 50 });
+    // Default: light from upper-left, classic sphere lighting
+    setLight({ nx: -0.4, ny: -0.6 });
   }
 
   const [sym, sub] =
@@ -102,6 +196,9 @@ function Portal({
     : isSending ? ["",   "SENDING"]
     : hasFiles  ? ["",   "READY"]
     :             ["◈",  "RIFT"];
+
+  // Unique IDs to avoid SVG gradient collisions if component mounts multiple times
+  const uid = "portal";
 
   return (
     <div
@@ -114,103 +211,149 @@ function Portal({
         viewBox="0 0 300 300"
         width={260}
         height={260}
-        style={{
-          display: "block",
-          overflow: "visible",
-          transform: `perspective(700px) rotateX(${tilt.x}deg) rotateY(${tilt.y}deg)`,
-          transition: isRest
-            ? "transform 0.72s cubic-bezier(0.16,1,0.3,1)"
-            : "transform 0.09s ease-out",
-        }}
+        style={{ display: "block", overflow: "visible" }}
       >
         <defs>
-          {/* Ring animations + breathe keyframes */}
+          {/* Ring animations */}
           <style>{RING_CSS}</style>
 
-          {/* ── Hemisphere masks for genuine 3D ring occlusion ───────── */}
-          {/* Front hemisphere: only shows y >= PCY (bottom half = front of orbit) */}
-          <mask id="rfFH">
+          {/* Hemisphere masks */}
+          <mask id={`${uid}FH`}>
             <rect x="0" y={PCY} width="300" height="300" fill="white"/>
           </mask>
-          {/* Back hemisphere: only shows y < PCY (top half = back of orbit) */}
-          <mask id="rfBH">
+          <mask id={`${uid}BH`}>
             <rect x="0" y="0" width="300" height={PCY} fill="white"/>
           </mask>
 
-          {/* ── Filters ─────────────────────────────────────────────── */}
-          {/* Sharp glow — preserves bright core */}
-          <filter id="rfsm" x="-60%" y="-60%" width="220%" height="220%">
+          {/* Sphere clip — only render sphere content inside the circle */}
+          <clipPath id={`${uid}SC`}>
+            <circle cx={PCX} cy={PCY} r={PSR}/>
+          </clipPath>
+
+          {/* Filters */}
+          <filter id={`${uid}sm`} x="-60%" y="-60%" width="220%" height="220%">
             <feGaussianBlur in="SourceGraphic" stdDeviation="3.2" result="b"/>
             <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
           </filter>
-          {/* Soft medium blur for arc halos */}
-          <filter id="rfmd" x="-100%" y="-100%" width="300%" height="300%">
+          <filter id={`${uid}md`} x="-100%" y="-100%" width="300%" height="300%">
             <feGaussianBlur in="SourceGraphic" stdDeviation="9"/>
           </filter>
-          {/* Large blur for ambient background */}
-          <filter id="rflg" x="-150%" y="-150%" width="400%" height="400%">
+          <filter id={`${uid}lg`} x="-150%" y="-150%" width="400%" height="400%">
             <feGaussianBlur in="SourceGraphic" stdDeviation="22"/>
           </filter>
+          {/* Specular highlight blur — very tight */}
+          <filter id={`${uid}sp`} x="-80%" y="-80%" width="260%" height="260%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="1.8"/>
+          </filter>
+          {/* Soft diffuse blur */}
+          <filter id={`${uid}df`} x="-80%" y="-80%" width="260%" height="260%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="6"/>
+          </filter>
+          {/* Rim glow */}
+          <filter id={`${uid}rim`} x="-60%" y="-60%" width="220%" height="220%">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="4"/>
+          </filter>
 
-          {/* ── Sphere gradients ─────────────────────────────────────── */}
-          {/* Main 3D fill — bright specular tracks mouse across full sphere */}
-          <radialGradient id="rfsph" cx={`${spec.cx}%`} cy={`${spec.cy}%`} r="70%">
-            <stop offset="0%"   stopColor={`rgb(${baseRgb})`} stopOpacity="0.52"/>
-            <stop offset="35%"  stopColor="rgb(9,7,26)"        stopOpacity="0.92"/>
-            <stop offset="100%" stopColor="rgb(4,4,12)"        stopOpacity="1"/>
+          {/* ── SPHERE GRADIENTS — all computed from shading physics ── */}
+
+          {/* Base sphere color: dark space, deep and rich */}
+          <radialGradient id={`${uid}base`} cx="50%" cy="50%" r="50%">
+            <stop offset="0%"   stopColor="rgb(22,18,48)"   stopOpacity="1"/>
+            <stop offset="60%"  stopColor="rgb(10,8,28)"    stopOpacity="1"/>
+            <stop offset="100%" stopColor="rgb(4,3,14)"     stopOpacity="1"/>
           </radialGradient>
 
-          {/* Rim edge — accent color bleeds at the sphere silhouette */}
-          <radialGradient id="rfrim" cx="50%" cy="50%" r="50%">
-            <stop offset="62%"  stopColor="transparent"       stopOpacity="0"/>
-            <stop offset="100%" stopColor={`rgb(${baseRgb})`} stopOpacity="0.32"/>
-          </radialGradient>
-
-          {/* Primary specular hot-spot — no clamp, tracks mouse fully */}
+          {/* Lambertian diffuse — lit hemisphere brightening */}
           <radialGradient
-            id="rfsp2"
-            cx={`${spec.cx}%`}
-            cy={`${spec.cy - 5}%`}
-            r="19%"
+            id={`${uid}diff`}
+            cx={`${((shading.diffuseCx - PCX + PSR) / (PSR * 2)) * 100}%`}
+            cy={`${((shading.diffuseCy - PCY + PSR) / (PSR * 2)) * 100}%`}
+            r="85%"
+            gradientUnits="objectBoundingBox"
           >
-            <stop offset="0%"   stopColor="white" stopOpacity="0.90"/>
-            <stop offset="55%"  stopColor="white" stopOpacity="0.14"/>
-            <stop offset="100%" stopColor="white" stopOpacity="0"/>
-          </radialGradient>
-
-          {/* Secondary fill light — opposite side of specular (two-point lighting) */}
-          <radialGradient
-            id="rfsp3"
-            cx={`${100 - spec.cx}%`}
-            cy={`${100 - spec.cy}%`}
-            r="45%"
-          >
-            <stop offset="0%"   stopColor={`rgb(${baseRgb})`} stopOpacity="0.16"/>
+            <stop offset="0%"   stopColor={`rgb(${baseRgb})`} stopOpacity={String(shading.diffuseOpacity)}/>
+            <stop offset="40%"  stopColor={`rgb(${baseRgb})`} stopOpacity={String(shading.diffuseOpacity * 0.3)}/>
             <stop offset="100%" stopColor={`rgb(${baseRgb})`} stopOpacity="0"/>
           </radialGradient>
 
-          {/* Ambient background radial */}
-          <radialGradient id="rfamb" cx="50%" cy="50%" r="50%">
+          {/* Dark side shadow — opposite the light */}
+          <radialGradient
+            id={`${uid}dark`}
+            cx={`${((shading.shadowCx - PCX + PSR) / (PSR * 2)) * 100}%`}
+            cy={`${((shading.shadowCy - PCY + PSR) / (PSR * 2)) * 100}%`}
+            r="75%"
+            gradientUnits="objectBoundingBox"
+          >
+            <stop offset="30%"  stopColor="rgb(0,0,0)" stopOpacity="0.72"/>
+            <stop offset="100%" stopColor="rgb(0,0,0)" stopOpacity="0"/>
+          </radialGradient>
+
+          {/* Specular hot-spot — tight, bright, physically positioned */}
+          <radialGradient
+            id={`${uid}spec`}
+            cx={`${((shading.specCx - PCX + PSR) / (PSR * 2)) * 100}%`}
+            cy={`${((shading.specCy - PCY + PSR) / (PSR * 2)) * 100}%`}
+            r="22%"
+            gradientUnits="objectBoundingBox"
+          >
+            <stop offset="0%"   stopColor="rgb(255,255,255)" stopOpacity={String(shading.specOpacity)}/>
+            <stop offset="35%"  stopColor="rgb(220,240,255)" stopOpacity={String(shading.specOpacity * 0.35)}/>
+            <stop offset="100%" stopColor="rgb(255,255,255)" stopOpacity="0"/>
+          </radialGradient>
+
+          {/* Secondary specular lobe — slightly wider, softer */}
+          <radialGradient
+            id={`${uid}spec2`}
+            cx={`${((shading.specCx - PCX + PSR) / (PSR * 2)) * 100}%`}
+            cy={`${((shading.specCy - PCY + PSR) / (PSR * 2)) * 100}%`}
+            r="40%"
+            gradientUnits="objectBoundingBox"
+          >
+            <stop offset="0%"   stopColor="rgb(200,230,255)" stopOpacity={String(shading.specOpacity * 0.28)}/>
+            <stop offset="100%" stopColor="rgb(200,230,255)" stopOpacity="0"/>
+          </radialGradient>
+
+          {/* Fill light — dim bounce from the dark side */}
+          <radialGradient
+            id={`${uid}fill`}
+            cx={`${((shading.fillCx - PCX + PSR) / (PSR * 2)) * 100}%`}
+            cy={`${((shading.fillCy - PCY + PSR) / (PSR * 2)) * 100}%`}
+            r="75%"
+            gradientUnits="objectBoundingBox"
+          >
+            <stop offset="0%"   stopColor={`rgb(${baseRgb})`} stopOpacity={String(shading.fillOpacity)}/>
+            <stop offset="100%" stopColor={`rgb(${baseRgb})`} stopOpacity="0"/>
+          </radialGradient>
+
+          {/* Fresnel rim — edge glow, strongest opposite the light */}
+          {/* We approximate Fresnel as a stroke on the circle with blur */}
+          {/* AO darkening at bottom */}
+          <radialGradient id={`${uid}ao`} cx="50%" cy="90%" r="50%">
+            <stop offset="0%"   stopColor="rgb(0,0,0)" stopOpacity={String(shading.aoOpacity)}/>
+            <stop offset="100%" stopColor="rgb(0,0,0)" stopOpacity="0"/>
+          </radialGradient>
+
+          {/* Atmosphere/ambient glow around sphere */}
+          <radialGradient id={`${uid}amb`} cx="50%" cy="50%" r="50%">
             <stop offset="0%"   stopColor={`rgb(${baseRgb})`} stopOpacity={String(ambAlpha)}/>
             <stop offset="100%" stopColor={`rgb(${baseRgb})`} stopOpacity="0"/>
           </radialGradient>
 
           {/* Text gradient */}
-          <linearGradient id="rftg" x1="20%" y1="0%" x2="80%" y2="100%">
+          <linearGradient id={`${uid}tg`} x1="20%" y1="0%" x2="80%" y2="100%">
             <stop offset="0%"   stopColor={`rgb(${baseRgb})`}/>
             <stop offset="100%" stopColor="rgb(180,120,255)"/>
           </linearGradient>
         </defs>
 
-        {/* ══ 0. Ambient background glow ══════════════════════════════ */}
+        {/* ══ 0. Ambient atmosphere glow ══════════════════════════════ */}
         <ellipse
           cx={PCX} cy={PCY} rx={145} ry={145}
-          fill="url(#rfamb)"
-          filter="url(#rflg)"
+          fill={`url(#${uid}amb)`}
+          filter={`url(#${uid}lg)`}
         />
 
-        {/* ══ 1. Back arc dim base strokes — UNDER SPHERE ═════════════
-            Opacity 0.025 vs front's 0.78 = 31× contrast → convincing 3D depth */}
+        {/* ══ 1. Ring back arcs — UNDER sphere ════════════════════════ */}
         {RINGS.map((r, i) => (
           <path
             key={`bb${i}`}
@@ -222,8 +365,6 @@ function Portal({
             className="rfrb"
           />
         ))}
-
-        {/* ══ 2. Back arc dim halo — UNDER SPHERE ═════════════════════ */}
         {RINGS.map((r, i) => (
           <path
             key={`bh${i}`}
@@ -232,15 +373,10 @@ function Portal({
             stroke={`rgb(${r.rgb})`}
             strokeWidth={r.gsw}
             strokeOpacity="0.025"
-            filter="url(#rfmd)"
+            filter={`url(#${uid}md)`}
             className="rfrb"
           />
         ))}
-
-        {/* ══ 3. Back traveling bright core — UNDER SPHERE ═════════════
-            Masked to top-half (y < PCY). Sphere body naturally occludes
-            whatever portion passes through the sphere's circular footprint.
-            Dim (0.12) — the orbiting dot is barely visible behind the planet. */}
         {RINGS.map((r, i) => (
           <ellipse
             key={`tbd${i}`}
@@ -251,49 +387,68 @@ function Portal({
             strokeOpacity="0.12"
             strokeDasharray={`${r.cLen} ${r.cGap}`}
             className={r.cls}
-            mask="url(#rfBH)"
+            mask={`url(#${uid}BH)`}
           />
         ))}
 
-        {/* ══ 4. Sphere drop shadow ════════════════════════════════════ */}
+        {/* ══ 2. Contact shadow beneath sphere ════════════════════════ */}
         <ellipse
-          cx={PCX + 3} cy={PCY + 15}
-          rx={46} ry={11}
+          cx={PCX + 4} cy={PCY + 18}
+          rx={48} ry={10}
           fill="black"
-          opacity="0.45"
-          filter="url(#rfmd)"
+          opacity="0.55"
+          filter={`url(#${uid}md)`}
         />
 
-        {/* ══ 5. Sphere body — fully opaque edge occludes back arcs ════ */}
-        <circle cx={PCX} cy={PCY} r={PSR} fill="url(#rfsph)"/>
+        {/* ══ 3. SPHERE — all layers clipped to circle ════════════════ */}
+        <g clipPath={`url(#${uid}SC)`}>
 
-        {/* ══ 6. Sphere rim edge glow ══════════════════════════════════ */}
-        <circle cx={PCX} cy={PCY} r={PSR} fill="url(#rfrim)"/>
+          {/* 3a. Base color — deep space dark */}
+          <circle cx={PCX} cy={PCY} r={PSR} fill={`url(#${uid}base)`}/>
 
-        {/* ══ 7. Sphere inner structural depth rings ═══════════════════ */}
+          {/* 3b. Lambertian diffuse — lights up the facing hemisphere */}
+          <circle cx={PCX} cy={PCY} r={PSR} fill={`url(#${uid}diff)`}/>
+
+          {/* 3c. Dark side terminator — deep shadow on unlit hemisphere */}
+          <circle cx={PCX} cy={PCY} r={PSR} fill={`url(#${uid}dark)`}/>
+
+          {/* 3d. Fill / bounce light — very subtle warm-up of the dark side */}
+          <circle cx={PCX} cy={PCY} r={PSR} fill={`url(#${uid}fill)`}/>
+
+          {/* 3e. Ambient occlusion — bottom darkening, gravity sense */}
+          <circle cx={PCX} cy={PCY} r={PSR} fill={`url(#${uid}ao)`}/>
+
+          {/* 3f. Secondary specular lobe — halo around hot spot */}
+          <circle cx={PCX} cy={PCY} r={PSR} fill={`url(#${uid}spec2)`}/>
+
+          {/* 3g. Primary specular hot-spot — tight, brilliant */}
+          <circle cx={PCX} cy={PCY} r={PSR} fill={`url(#${uid}spec)`}/>
+
+        </g>
+
+        {/* ══ 4. Fresnel rim glow — OUTSIDE clip, stroked silhouette ══
+             Approximates the brightening at grazing angles (Fresnel effect).
+             Two concentric strokes: inner accent + outer soft bloom.
+             The rim is strongest on the side opposite the light. */}
+        {/* Rim bloom — wide soft glow */}
         <circle
-          cx={PCX} cy={PCY} r={PSR - 9}
+          cx={PCX} cy={PCY} r={PSR - 1}
           fill="none"
           stroke={`rgb(${baseRgb})`}
-          strokeWidth="0.5"
-          strokeOpacity="0.13"
+          strokeWidth="10"
+          strokeOpacity={String(shading.rimOpacity * 0.5)}
+          filter={`url(#${uid}rim)`}
         />
+        {/* Rim crisp inner line */}
         <circle
-          cx={PCX} cy={PCY} r={PSR - 20}
+          cx={PCX} cy={PCY} r={PSR - 0.5}
           fill="none"
           stroke={`rgb(${baseRgb})`}
-          strokeWidth="0.4"
-          strokeOpacity="0.07"
+          strokeWidth="1.2"
+          strokeOpacity={String(shading.rimOpacity)}
         />
 
-        {/* ══ 8. Secondary fill light (rim lighting, opposite specular) */}
-        <circle cx={PCX} cy={PCY} r={PSR} fill="url(#rfsp3)"/>
-
-        {/* ══ 9. Primary specular hot-spot — full sphere tracking ══════ */}
-        <circle cx={PCX} cy={PCY} r={PSR} fill="url(#rfsp2)"/>
-
-        {/* ══ 10. Front arc bright base strokes — ABOVE SPHERE ══════════
-             Opacity 0.78 with breathe → ranges 0.39–0.70. 31× brighter than back. */}
+        {/* ══ 5. Front ring arcs — ABOVE sphere ═══════════════════════ */}
         {RINGS.map((r, i) => (
           <path
             key={`fb${i}`}
@@ -305,8 +460,6 @@ function Portal({
             className="rfrb"
           />
         ))}
-
-        {/* ══ 11. Front arc bright halo — ABOVE SPHERE ════════════════ */}
         {RINGS.map((r, i) => (
           <path
             key={`fh${i}`}
@@ -315,13 +468,9 @@ function Portal({
             stroke={`rgb(${r.rgb})`}
             strokeWidth={r.gsw * 1.6}
             strokeOpacity="0.18"
-            filter="url(#rfsm)"
+            filter={`url(#${uid}sm)`}
           />
         ))}
-
-        {/* ══ 12. Ambient traveling halo — full ellipse, bloom only ════
-             Very dim (0.08) — creates a luminous trail around the full orbit
-             without revealing the back arc position. */}
         {RINGS.map((r, i) => (
           <ellipse
             key={`tg${i}`}
@@ -332,13 +481,9 @@ function Portal({
             strokeOpacity="0.08"
             strokeDasharray={`${r.gLen} ${r.gGap}`}
             className={r.cls}
-            filter="url(#rfsm)"
+            filter={`url(#${uid}sm)`}
           />
         ))}
-
-        {/* ══ 13. Front traveling bright core — ABOVE SPHERE, MASKED ═══
-             Masked to bottom-half (y >= PCY). Brilliant (0.95).
-             The dot blazes in front, vanishes behind — genuine orbital occlusion. */}
         {RINGS.map((r, i) => (
           <ellipse
             key={`tfd${i}`}
@@ -349,12 +494,12 @@ function Portal({
             strokeOpacity="0.95"
             strokeDasharray={`${r.cLen} ${r.cGap}`}
             className={r.cls}
-            mask="url(#rfFH)"
+            mask={`url(#${uid}FH)`}
           />
         ))}
 
-        {/* ══ 14. Sphere state label ════════════════════════════════════ */}
-        <g filter="url(#rfsm)">
+        {/* ══ 6. Sphere label ══════════════════════════════════════════ */}
+        <g filter={`url(#${uid}sm)`}>
           {sym && (
             <text
               x={PCX}
@@ -364,7 +509,7 @@ function Portal({
               fontFamily="'JetBrains Mono', monospace"
               fontSize={sym === "◈" ? 22 : 28}
               fontWeight="900"
-              fill="url(#rftg)"
+              fill={`url(#${uid}tg)`}
             >
               {sym}
             </text>
@@ -391,7 +536,7 @@ function Portal({
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ── DropZone ──────────────────────────────────────────────────────────────────
 
 export function DropZone() {
   const [isDragging, setIsDragging] = useState(false);
@@ -469,7 +614,7 @@ export function DropZone() {
         </p>
       </div>
 
-      {/* 3D SVG Portal */}
+      {/* 3D Sphere */}
       <Portal
         dragging={isDragging}
         hasFiles={stagedFiles.length > 0}
