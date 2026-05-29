@@ -1,5 +1,27 @@
-use crate::state::Device;
-use crate::transfer::manifest::{FileManifest, ResumeManifest, TransferManifest};
+//! Queue-based multi-stream sender with integrated transfer overseer.
+//!
+//! Public API
+//! ──────────
+//! send_files_to_device  — full orchestration: request → accept → manifest → stream
+//! send_text_to_device   — single HTTP POST to /text/:tid
+//! send_multi_stream     — raw streaming layer (called by send_files_to_device)
+//!
+//! Architecture
+//! ────────────
+//! All pending chunks for a file are placed in a single shared
+//! `Arc<Mutex<VecDeque<usize>>>`.  NUM_STREAMS worker tasks compete to pop
+//! the next chunk ID, read its bytes from the source file, and fire it over
+//! their TCP connection.  No chunk is pre-assigned to any stream.
+//!
+//! Workers report every dispatch, confirmation, and NACK to the FileOverseer.
+//! The overseer runs as a concurrent background task.  It re-queues any chunk
+//! that has been in-flight longer than INFLIGHT_TIMEOUT so a healthy worker
+//! will pick it up without waiting for the transfer to finish.
+
+use crate::state::{Device, FileEntry, SharedState, TransferRequest};
+use crate::transfer::manifest::{
+    build_manifest, FileManifest, ResumeManifest, SenderDevice, TransferManifest,
+};
 use crate::transfer::overseer::{FileOverseer, run_overseer};
 use crate::transfer::stream_server::STREAM_PORT;
 use std::collections::{HashSet, VecDeque};
@@ -12,20 +34,165 @@ use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 /// Number of concurrent worker streams per file.
-/// Four connections saturate a local WiFi link more aggressively than two
-/// without adding meaningful protocol complexity.
 pub const NUM_STREAMS: usize = 4;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const ACK_TIMEOUT:     Duration = Duration::from_secs(30);
-
-/// How long a worker sleeps when the queue is momentarily empty but the
-/// overseer may still re-queue timed-out chunks.
+const CONNECT_TIMEOUT:    Duration = Duration::from_secs(10);
+const ACK_TIMEOUT:        Duration = Duration::from_secs(30);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-// ── Entry point ───────────────────────────────────────────────────────────────
+/// How long to wait for the receiver to accept or decline before giving up.
+const ACCEPT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Send all files to `target`.
+// ── Public orchestration ──────────────────────────────────────────────────────
+
+/// Full file-send flow:
+///   1. POST /request  → receiver's UI shows the incoming-transfer prompt.
+///   2. Await accept/decline via our own server's transfer_notifiers channel.
+///   3. Build TransferManifest (reads + BLAKE3-hashes all file content).
+///   4. POST /manifest → receiver pre-allocates files, returns ResumeManifest.
+///   5. Call send_multi_stream to stream all chunks over NUM_STREAMS TCP workers.
+pub async fn send_files_to_device(
+    transfer_id: String,
+    target:      Device,
+    files:       Vec<FileEntry>,
+    state:       SharedState,
+    app:         AppHandle,
+) -> anyhow::Result<()> {
+    // ── Own device info ───────────────────────────────────────────────────────
+    let (own_id, own_name, own_port) = {
+        let s = state.lock().await;
+        (s.own_id.clone(), s.own_device_name.clone(), s.own_port)
+    };
+
+    let own_ip = local_ip_address::local_ip()
+        .ok()
+        .and_then(|ip| match ip {
+            std::net::IpAddr::V4(v4) => Some(v4.to_string()),
+            _                        => None,
+        })
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+
+    // ── POST /request ─────────────────────────────────────────────────────────
+    let total_bytes: u64 = files.iter().map(|f| f.size_bytes).sum();
+
+    let request = TransferRequest {
+        transfer_id:   transfer_id.clone(),
+        sender_device: Device {
+            id:            own_id.clone(),
+            name:          own_name.clone(),
+            os:            std::env::consts::OS.to_string(),
+            ip:            own_ip.clone(),
+            port:          own_port,
+            latency_ms:    None,
+            discovered_at: 0,
+        },
+        files: files.clone(),
+        total_bytes,
+    };
+
+    reqwest::Client::new()
+        .post(format!("http://{}:{}/request", target.ip, target.port))
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Transfer request to {} failed: {e}", target.ip))?;
+
+    // ── Wait for accept/decline ───────────────────────────────────────────────
+    // Our own server's handle_accept / handle_decline fires on the notifier.
+    // handle_decline already emits transfer_error to the frontend before
+    // sending false, so we just bail here without double-emitting.
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    state.lock().await.transfer_notifiers.insert(transfer_id.clone(), tx);
+
+    let accepted = tokio::time::timeout(ACCEPT_TIMEOUT, rx)
+        .await
+        .map_err(|_| anyhow::anyhow!(
+            "Transfer {transfer_id} timed out — receiver did not respond within 120 s"
+        ))?
+        .map_err(|_| anyhow::anyhow!(
+            "Transfer notifier channel dropped for {transfer_id}"
+        ))?;
+
+    if !accepted {
+        anyhow::bail!("Transfer {transfer_id} declined by receiver");
+    }
+
+    // ── Build manifest ────────────────────────────────────────────────────────
+    let file_paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+    let file_entries: Vec<(String, String, u64)> = files
+        .iter()
+        .map(|f| (f.name.clone(), f.path.clone(), f.size_bytes))
+        .collect();
+
+    let manifest = build_manifest(
+        transfer_id.clone(),
+        SenderDevice {
+            id:   own_id,
+            name: own_name,
+            os:   std::env::consts::OS.to_string(),
+            ip:   own_ip,
+            port: own_port,
+        },
+        &file_entries,
+        NUM_STREAMS,
+    )
+    .await?;
+
+    // ── POST /manifest ────────────────────────────────────────────────────────
+    let resume: ResumeManifest = reqwest::Client::new()
+        .post(format!("http://{}:{}/manifest", target.ip, target.port))
+        .json(&manifest)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Manifest POST to {} failed: {e}", target.ip))?
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("ResumeManifest deserialize failed: {e}"))?;
+
+    // ── Stream ────────────────────────────────────────────────────────────────
+    send_multi_stream(&manifest, &resume, &target, &file_paths, &app).await
+}
+
+/// Sends a plain-text message to the target's /text/:tid endpoint.
+/// No accept/decline flow — fires and forgets over HTTP.
+pub async fn send_text_to_device(
+    transfer_id: String,
+    target:      Device,
+    text:        String,
+    state:       SharedState,
+    _app:        AppHandle,
+) -> anyhow::Result<()> {
+    let (own_id, own_name, own_port) = {
+        let s = state.lock().await;
+        (s.own_id.clone(), s.own_device_name.clone(), s.own_port)
+    };
+
+    let own_ip = local_ip_address::local_ip()
+        .ok()
+        .and_then(|ip| match ip {
+            std::net::IpAddr::V4(v4) => Some(v4.to_string()),
+            _                        => None,
+        })
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+
+    reqwest::Client::new()
+        .post(format!("http://{}:{}/text/{}", target.ip, target.port, transfer_id))
+        .header("x-sender-id",   &own_id)
+        .header("x-sender-name", &own_name)
+        .header("x-sender-ip",   &own_ip)
+        .header("x-sender-port", own_port.to_string())
+        .header("x-sender-os",   std::env::consts::OS)
+        .body(text)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Text send to {} failed: {e}", target.ip))?;
+
+    Ok(())
+}
+
+// ── send_multi_stream ─────────────────────────────────────────────────────────
+
+/// Stream all files in `manifest` to `target`.
 ///
 /// For each file:
 ///   1. Build the shared chunk queue (non-completed chunks, ascending order).
@@ -53,9 +220,8 @@ pub async fn send_multi_stream(
         let file_path = file_paths.get(fi).cloned().unwrap_or_default();
         let fm = Arc::new(file_manifest.clone());
 
-        // ── Shared work queue ─────────────────────────────────────────────
-        // Non-completed chunk IDs in ascending order; ascending = both source
-        // file seeks are always forward, maximising OS read-ahead.
+        // Non-completed chunk IDs in ascending order; forward seeks maximise
+        // OS read-ahead on the source file.
         let queue: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new(
             fm.chunks
                 .iter()
@@ -64,7 +230,7 @@ pub async fn send_multi_stream(
                 .collect(),
         ));
 
-        // ── Overseer ──────────────────────────────────────────────────────
+        // ── Overseer ──────────────────────────────────────────────────────────
         let chunk_ids: Vec<usize> = fm.chunks.iter().map(|c| c.id).collect();
         let overseer = FileOverseer::new(
             manifest.transfer_id.clone(),
@@ -82,7 +248,7 @@ pub async fn send_multi_stream(
             tokio::spawn(async move { run_overseer(o, tid, shutdown_rx).await })
         };
 
-        // ── Workers ───────────────────────────────────────────────────────
+        // ── Workers ───────────────────────────────────────────────────────────
         let mut join_set = JoinSet::new();
 
         for worker_id in 0..NUM_STREAMS {
@@ -104,42 +270,31 @@ pub async fn send_multi_stream(
             });
         }
 
-        // ── Drain workers — collect all errors before returning ───────────
+        // ── Drain workers — collect all errors before returning ───────────────
         let mut first_worker_err: Option<anyhow::Error> = None;
         while let Some(res) = join_set.join_next().await {
             match res {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
-                    if first_worker_err.is_none() {
-                        first_worker_err = Some(e);
-                    }
+                    if first_worker_err.is_none() { first_worker_err = Some(e); }
                 }
                 Err(je) => {
                     if first_worker_err.is_none() {
-                        first_worker_err =
-                            Some(anyhow::anyhow!("Worker task panicked: {je}"));
+                        first_worker_err = Some(anyhow::anyhow!("Worker task panicked: {je}"));
                     }
                 }
             }
         }
 
-        // Signal overseer shutdown (fires final ledger verification).
-        // Ignore send error — overseer may have already exited on completion.
         let _ = shutdown_tx.send(true);
 
-        // Await overseer final verdict.
         let overseer_res = overseer_handle
             .await
             .map_err(|je| anyhow::anyhow!("Overseer task panicked: {je}"))
             .and_then(|r| r);
 
-        // Overseer verdict takes priority: it has the independent view.
-        if let Err(e) = overseer_res {
-            return Err(e);
-        }
-        if let Some(e) = first_worker_err {
-            return Err(e);
-        }
+        if let Err(e) = overseer_res   { return Err(e); }
+        if let Some(e) = first_worker_err { return Err(e); }
 
         eprintln!(
             "[StreamClient] File {fi} — all {} chunks confirmed, overseer verified",
@@ -152,7 +307,7 @@ pub async fn send_multi_stream(
 
 // ── Worker ────────────────────────────────────────────────────────────────────
 
-/// Public wrapper.  Always calls reclaim_worker before returning so orphaned
+/// Public wrapper. Always calls reclaim_worker before returning so orphaned
 /// in-flight chunks are returned to the queue immediately on any exit path.
 async fn stream_worker(
     transfer_id:   String,
@@ -173,13 +328,12 @@ async fn stream_worker(
     )
     .await;
 
-    // Reclaim in-flight chunks this worker held at exit time (no-op on clean exit).
     overseer.reclaim_worker(worker_id).await;
 
     result
 }
 
-/// Inner implementation.  May use `?` freely — reclaim_worker is handled by
+/// Inner implementation. May use `?` freely — reclaim_worker is handled by
 /// the outer wrapper.
 async fn stream_worker_inner(
     transfer_id:   &str,
@@ -206,41 +360,31 @@ async fn stream_worker_inner(
     // ── Handshake ─────────────────────────────────────────────────────────────
     writer
         .write_all(
-            format!(
-                "RIFT-STREAM/1.0\n{transfer_id}\n{file_index}\n{worker_id}\n"
-            )
-            .as_bytes(),
+            format!("RIFT-STREAM/1.0\n{transfer_id}\n{file_index}\n{worker_id}\n").as_bytes(),
         )
         .await?;
 
     line.clear();
     reader.read_line(&mut line).await?;
     if line.trim() != "READY" {
-        anyhow::bail!(
-            "Worker {worker_id}: expected READY, got: {}",
-            line.trim()
-        );
+        anyhow::bail!("Worker {worker_id}: expected READY, got: {}", line.trim());
     }
 
-    // ── Source file (per-worker read-only handle) ─────────────────────────────
+    // ── Source file ───────────────────────────────────────────────────────────
     let mut src = tokio::fs::File::open(file_path)
         .await
         .map_err(|e| anyhow::anyhow!("Worker {worker_id}: cannot open {file_path}: {e}"))?;
 
     eprintln!(
-        "[StreamClient] Worker {worker_id} ready \
-         (file={file_index} transfer={transfer_id})"
+        "[StreamClient] Worker {worker_id} ready (file={file_index} transfer={transfer_id})"
     );
 
     // ── Chunk dispatch loop ───────────────────────────────────────────────────
     loop {
-        // Pop the next chunk ID from the shared queue.
         let chunk_id = queue.lock().await.pop_front();
 
         let chunk_id = match chunk_id {
             Some(id) => id,
-
-            // Queue empty.  Check if the transfer is fully accounted for.
             None => {
                 let (confirmed, failed) = overseer.completion_counts().await;
                 let total = overseer.total_chunks;
@@ -252,17 +396,14 @@ async fn stream_worker_inner(
                              (file={file_index} transfer={transfer_id})"
                         );
                     }
-                    // All chunks confirmed — clean exit.
                     break;
                 }
 
-                // More chunks expected (overseer may re-queue timed-out ones).
                 tokio::time::sleep(IDLE_POLL_INTERVAL).await;
                 continue;
             }
         };
 
-        // Notify overseer this chunk is now in-flight.
         overseer.track_dispatch(chunk_id, worker_id).await;
 
         let chunk_info = file_manifest
@@ -270,25 +411,15 @@ async fn stream_worker_inner(
             .get(chunk_id)
             .ok_or_else(|| anyhow::anyhow!("Chunk {chunk_id} not in manifest"))?;
 
-        // ── Read chunk bytes from source file ─────────────────────────────────
         src.seek(tokio::io::SeekFrom::Start(chunk_info.offset))
             .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Worker {worker_id}: seek source chunk {chunk_id}: {e}"
-                )
-            })?;
+            .map_err(|e| anyhow::anyhow!("Worker {worker_id}: seek chunk {chunk_id}: {e}"))?;
 
         let mut buf = vec![0u8; chunk_info.size as usize];
         src.read_exact(&mut buf)
             .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Worker {worker_id}: read source chunk {chunk_id}: {e}"
-                )
-            })?;
+            .map_err(|e| anyhow::anyhow!("Worker {worker_id}: read chunk {chunk_id}: {e}"))?;
 
-        // ── Send CHUNK header + raw bytes ─────────────────────────────────────
         writer
             .write_all(
                 format!(
@@ -300,26 +431,17 @@ async fn stream_worker_inner(
             .await?;
         writer.write_all(&buf).await?;
 
-        // ── Wait for ACK / NACK ───────────────────────────────────────────────
         line.clear();
         match tokio::time::timeout(ACK_TIMEOUT, reader.read_line(&mut line)).await {
-            Err(_) => anyhow::bail!(
-                "Worker {worker_id}: ACK timeout for chunk {chunk_id}"
-            ),
-            Ok(Err(e)) => anyhow::bail!(
-                "Worker {worker_id}: ACK read error chunk {chunk_id}: {e}"
-            ),
-            Ok(Ok(0)) => anyhow::bail!(
-                "Worker {worker_id}: connection closed before ACK chunk {chunk_id}"
-            ),
-            Ok(Ok(_)) => {}
+            Err(_)        => anyhow::bail!("Worker {worker_id}: ACK timeout chunk {chunk_id}"),
+            Ok(Err(e))    => anyhow::bail!("Worker {worker_id}: ACK read error chunk {chunk_id}: {e}"),
+            Ok(Ok(0))     => anyhow::bail!("Worker {worker_id}: connection closed before ACK chunk {chunk_id}"),
+            Ok(Ok(_))     => {}
         }
 
         let resp = line.trim();
 
         if resp.starts_with("NACK") {
-            // Hand off to overseer: increments retry counter, re-queues or
-            // marks permanent depending on budget.
             let should_continue = overseer.track_nack(chunk_id).await;
             if !should_continue {
                 anyhow::bail!(
@@ -327,11 +449,9 @@ async fn stream_worker_inner(
                      (file={file_index} transfer={transfer_id})"
                 );
             }
-            // Chunk was re-queued at the front.  Continue to pop next chunk.
             continue;
         }
 
-        // ACK — confirm with overseer and emit frontend event.
         overseer.track_confirmed(chunk_id).await;
 
         let _ = app.emit(
@@ -345,11 +465,9 @@ async fn stream_worker_inner(
         );
     }
 
-    // ── Signal end-of-stream to receiver ─────────────────────────────────────
     writer.write_all(b"DONE\n").await?;
     eprintln!(
-        "[StreamClient] Worker {worker_id} DONE \
-         (file={file_index} transfer={transfer_id})"
+        "[StreamClient] Worker {worker_id} DONE (file={file_index} transfer={transfer_id})"
     );
     Ok(())
 }
