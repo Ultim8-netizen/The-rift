@@ -7,8 +7,9 @@ pub mod hotspot;
 pub mod rift_channel;
 pub mod subnet_scan;
 
-#[cfg(target_os = "android")]
-pub use android_wifi::acquire_wifi_locks;
+// acquire_wifi_locks is intentionally NOT re-exported — the function is a
+// permanent no-op and the call site in lib.rs has been removed. WiFi locks
+// are held by RiftService.kt on the Java side.
 pub use broadcast::start_broadcast_discovery;
 pub use heartbeat::start_heartbeat;
 pub use hotspot::{

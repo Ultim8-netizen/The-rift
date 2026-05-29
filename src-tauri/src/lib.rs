@@ -187,10 +187,6 @@ async fn accept_transfer(
             .cloned()
             .ok_or_else(|| "Pending transfer not found".to_string())?;
 
-        // Use the IP from device state (correctly discovered via mDNS/broadcast/scan).
-        // The pending.sender_device.ip is self-reported by the sender using
-        // local_ip_address::local_ip() which returns the wrong IP on multi-interface
-        // machines. unwrap_or_else falls back gracefully — never returns an error.
         let ip = s
             .devices
             .get(&pending.sender_device.id)
@@ -338,10 +334,16 @@ pub fn run() {
             detect_hotspot,
         ])
         .setup(move |app| {
-            #[cfg(target_os = "android")]
-            if let Err(e) = network::acquire_wifi_locks() {
-                eprintln!("[Setup] Android WiFi lock error: {e}");
-            }
+            // ── REMOVED: acquire_wifi_locks() ────────────────────────────────
+            // The previous call here caused a fatal SIGABRT on Android 11:
+            //   Abort message: 'android context was not initialized'
+            // ndk_context::android_context() panics when called from a Tokio
+            // background thread (Thread-2) before Tauri has finished setting
+            // up the JNI context pointer. The panic aborts the process.
+            //
+            // Fix: WiFi/multicast/wake locks are already acquired by
+            // RiftService.kt in onCreate() — before any Rust code runs.
+            // There is nothing for Rust to do here.
 
             let app_handle = app.handle().clone();
             let state_clone = shared_state.clone();

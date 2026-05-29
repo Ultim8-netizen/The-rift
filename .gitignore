@@ -52,3 +52,8 @@ tmp/
 
 #logo
 icon-source.png
+
+#app
+*.apk
+*.aab
+*.idsig
