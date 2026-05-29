@@ -8,7 +8,7 @@ use axum::{
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tauri::{AppHandle, Emitter};
 
 use crate::state::{
@@ -91,16 +91,16 @@ async fn handle_request(
 }
 
 /// Receives the TransferManifest from the sender.
-/// Pre-allocates files on disk and returns a ResumeManifest.
-/// If a transfer with this ID already exists (resume case), returns the
-/// current completed-chunks state so the sender skips already-written chunks.
+/// Pre-allocates files on disk, drops the pre-alloc handle immediately
+/// (per-connection handles take over for all writes), and returns a
+/// ResumeManifest listing any already-complete chunks.
 async fn handle_manifest(
     State(srv): State<Srv>,
     Json(manifest): Json<TransferManifest>,
 ) -> Result<Json<ResumeManifest>, StatusCode> {
     let tid = manifest.transfer_id.clone();
 
-    // Check for existing state (resume)
+    // Check for existing state (resume path)
     {
         let s = srv.state.lock().await;
         let existing = s.active_stream_transfers.get(&tid).cloned();
@@ -117,7 +117,8 @@ async fn handle_manifest(
         }
     }
 
-    // Fresh transfer — pre-allocate files
+    // Fresh transfer — pre-allocate files then close the handle.
+    // Stream-server connections each open their own write handle.
     let downloads = get_save_dir();
     if tokio::fs::create_dir_all(&downloads).await.is_err() {
         eprintln!("[Manifest] Cannot create downloads dir");
@@ -130,13 +131,9 @@ async fn handle_manifest(
         let safe_name = sanitize(&file_manifest.name);
         let dest = unique_path(&downloads, &safe_name);
 
-        // Create and pre-allocate the file.
-        // set_len() reserves the space without writing zeros on NTFS (sparse);
-        // on FAT32/exFAT it writes zeros, which is still correct.
         let file = match tokio::fs::OpenOptions::new()
             .create(true)
             .write(true)
-            .read(true)
             .open(&dest)
             .await
         {
@@ -152,6 +149,10 @@ async fn handle_manifest(
             return Err(StatusCode::INTERNAL_SERVER_ERROR);
         }
 
+        // Drop the pre-alloc handle.  Every subsequent write uses a fresh
+        // per-connection handle opened inside handle_connection_inner.
+        drop(file);
+
         eprintln!(
             "[Manifest] Pre-allocated {:?} ({} bytes)",
             dest, file_manifest.total_bytes
@@ -161,8 +162,9 @@ async fn handle_manifest(
             manifest: file_manifest.clone(),
             completed_chunks: tokio::sync::Mutex::new(HashSet::new()),
             dest_path: dest,
-            file_handle: tokio::sync::Mutex::new(file),
-            streams_done: AtomicUsize::new(0),  // ← fix: was missing
+            finalized: AtomicBool::new(false),
+            streams_expected: manifest.num_streams,
+            streams_done: AtomicUsize::new(0),
         }));
     }
 
@@ -180,14 +182,13 @@ async fn handle_manifest(
         .active_stream_transfers
         .insert(tid.clone(), transfer_state);
 
-    eprintln!("[Manifest] Registered {tid} — {} files", manifest.files.len());
+    eprintln!("[Manifest] Registered {tid} — {} files, {} streams expected",
+        manifest.files.len(), manifest.num_streams);
 
     let completed_per_file = vec![vec![]; manifest.files.len()];
     Ok(Json(ResumeManifest { transfer_id: tid, completed_per_file }))
 }
 
-/// Returns the current ResumeManifest for an active transfer.
-/// Used by the sender on reconnect to learn which chunks to skip.
 async fn handle_resume(
     Path(tid): Path<String>,
     State(srv): State<Srv>,
@@ -216,10 +217,7 @@ async fn handle_accept(
 ) -> StatusCode {
     let tx = srv.state.lock().await.transfer_notifiers.remove(&tid);
     match tx {
-        Some(tx) => {
-            let _ = tx.send(true);
-            StatusCode::OK
-        }
+        Some(tx) => { let _ = tx.send(true); StatusCode::OK }
         None => StatusCode::NOT_FOUND,
     }
 }
@@ -229,15 +227,10 @@ async fn handle_decline(
     State(srv): State<Srv>,
 ) -> StatusCode {
     let tx = srv.state.lock().await.transfer_notifiers.remove(&tid);
-    if let Some(tx) = tx {
-        let _ = tx.send(false);
-    }
+    if let Some(tx) = tx { let _ = tx.send(false); }
     let _ = srv.app.emit(
         "transfer_error",
-        &serde_json::json!({
-            "transferId": tid,
-            "message": "Transfer declined by recipient",
-        }),
+        &serde_json::json!({ "transferId": tid, "message": "Transfer declined by recipient" }),
     );
     StatusCode::OK
 }
@@ -252,9 +245,7 @@ async fn handle_text(
         Ok(t) => t,
         Err(_) => return StatusCode::BAD_REQUEST,
     };
-    if text.trim().is_empty() {
-        return StatusCode::BAD_REQUEST;
-    }
+    if text.trim().is_empty() { return StatusCode::BAD_REQUEST; }
 
     let sender_id   = header_str(&headers, "x-sender-id");
     let sender_name = header_str(&headers, "x-sender-name");
@@ -270,7 +261,7 @@ async fn handle_text(
             "senderDevice": {
                 "id":   sender_id,
                 "name": if sender_name.is_empty() { "Unknown Device".to_string() } else { sender_name },
-                "os":   if sender_os.is_empty()   { "unknown".to_string()         } else { sender_os   },
+                "os":   if sender_os.is_empty() { "unknown".to_string() } else { sender_os },
                 "ip":   sender_ip,
                 "port": sender_port,
                 "latencyMs": null,
@@ -317,24 +308,16 @@ fn sanitize(name: &str) -> String {
 
 fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
     let mut dest = dir.join(name);
-    if !dest.exists() {
-        return dest;
-    }
+    if !dest.exists() { return dest; }
     let stem = std::path::Path::new(name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("file");
+        .file_stem().and_then(|s| s.to_str()).unwrap_or("file");
     let ext = std::path::Path::new(name)
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|e| format!(".{e}"))
-        .unwrap_or_default();
+        .extension().and_then(|s| s.to_str())
+        .map(|e| format!(".{e}")).unwrap_or_default();
     let mut n = 1u32;
     loop {
         dest = dir.join(format!("{stem}({n}){ext}"));
-        if !dest.exists() {
-            return dest;
-        }
+        if !dest.exists() { return dest; }
         n += 1;
     }
 }

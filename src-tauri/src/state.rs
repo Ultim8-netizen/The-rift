@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
@@ -57,22 +57,28 @@ pub struct TransferRequest {
 pub struct HotspotInfo {
     pub ssid: String,
     pub password: String,
-    /// Actual gateway IP read at runtime — never hardcoded.
     pub gateway_ip: String,
-    /// true = this device is hosting, false = this device joined.
     pub is_host: bool,
 }
 
+/// Per-file receive state shared across all worker connections for that file.
+///
+/// Finalization is triggered by chunk count, not by stream count.  Any worker
+/// that writes the last missing chunk atomically claims finalization via
+/// `finalized`.  `streams_done` + `streams_expected` are used only for
+/// failure detection: if every worker has finished but not all chunks arrived,
+/// we emit an error instead of hanging forever.
 pub struct StreamReceiveState {
     pub manifest: crate::transfer::manifest::FileManifest,
     pub completed_chunks: Mutex<HashSet<usize>>,
     pub dest_path: PathBuf,
-    pub file_handle: Mutex<tokio::fs::File>,
-    /// Counts how many of the two TCP streams have sent DONE for this file.
-    /// Finalization fires only when this reaches 2 (both streams complete).
-    /// For files with only one stream's worth of chunks (very small files
-    /// where one stream gets 0 chunks), the sender still opens both
-    /// connections and sends DONE on both, so the gate of 2 is always correct.
+    /// Atomically claimed by whichever connection delivers the last chunk
+    /// (success path) or by whichever connection detects all workers are done
+    /// but chunks are still missing (failure path).  Prevents double-fire.
+    pub finalized: AtomicBool,
+    /// Number of worker connections the sender said it would open (= NUM_STREAMS).
+    pub streams_expected: usize,
+    /// Incremented whenever a connection terminates (DONE, clean close, error).
     pub streams_done: AtomicUsize,
 }
 

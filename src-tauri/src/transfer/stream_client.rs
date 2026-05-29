@@ -1,33 +1,43 @@
-//! Dual-stream TCP file sender.
+//! Queue-based dual-stream sender.
 //!
-//! Opens two independent TCP connections to the receiver's stream server.
-//! Stream 0 sends chunks in ascending order (forward from the start of the file).
-//! Stream 1 sends chunks in descending order (backward from the end of the file).
+//! Instead of statically assigning chunks to streams ("stream 0 owns the
+//! first half"), all pending chunks are placed in a single shared
+//! `Arc<Mutex<VecDeque>>`.  Every worker pulls the next unassigned chunk
+//! from the front, reads it from the source file, and fires it down its
+//! TCP connection.  Workers compete on the queue: whichever is ready first
+//! takes the next job.  If one worker stalls (slow ACK, seek latency),
+//! the other drains its share of the queue faster.  No chunk is ever
+//! "orphaned" by a fixed ownership assignment.
 //!
-//! At any point during transfer, bytes exist at both ends of the pre-allocated
-//! destination file. If the transfer is interrupted, the receiver's resume
-//! manifest reports which chunks are already written. On reconnect the sender
-//! skips those chunks entirely.
-//!
-//! Both streams run as concurrent Tokio tasks. The function returns when both
-//! complete (or either fails).
+//! The receiver is oblivious to which worker delivered which chunk.  It
+//! writes each arriving chunk to its `byte_offset` and tracks completeness
+//! with a `HashSet<usize>`; order of arrival is irrelevant.
 
 use crate::state::Device;
 use crate::transfer::manifest::{FileManifest, ResumeManifest, TransferManifest};
 use crate::transfer::stream_server::STREAM_PORT;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
+use tokio::task::JoinSet;
+
+/// Number of concurrent worker streams per file.
+/// Both connect to :7477 on the receiver and compete for chunks.
+pub const NUM_STREAMS: usize = 2;
 
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-const ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const ACK_TIMEOUT:     std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Send all files to `target` using the dual-stream protocol.
-/// `file_paths` must correspond 1-to-1 with `manifest.files`.
-/// `resume` tells us which chunks are already on the receiver and can be skipped.
-pub async fn send_dual_stream(
+/// Entry point called from `send_files_to_device`.
+///
+/// For each file in the transfer, builds a shared chunk queue from all
+/// non-completed chunk IDs (ascending order, so both workers seek forward
+/// in the source file), spawns `NUM_STREAMS` workers, and waits for all of
+/// them.  If any worker fails its `JoinSet` is dropped, cancelling the rest.
+pub async fn send_multi_stream(
     manifest: &TransferManifest,
     resume: &ResumeManifest,
     target: &Device,
@@ -44,90 +54,81 @@ pub async fn send_dual_stream(
         let file_path = file_paths.get(fi).cloned().unwrap_or_default();
         let fm = Arc::new(file_manifest.clone());
 
-        // Split chunks by stream; exclude already-completed
-        let mut s0_ids: Vec<usize> = fm
-            .chunks
-            .iter()
-            .filter(|c| c.stream == 0 && !completed.contains(&c.id))
-            .map(|c| c.id)
-            .collect();
-        let mut s1_ids: Vec<usize> = fm
-            .chunks
-            .iter()
-            .filter(|c| c.stream == 1 && !completed.contains(&c.id))
-            .map(|c| c.id)
-            .collect();
+        // All non-completed chunk IDs in ascending order.
+        // Ascending = both workers seek forward in the source file,
+        // which is the most cache-friendly access pattern.
+        let queue: Arc<Mutex<VecDeque<usize>>> = Arc::new(Mutex::new(
+            fm.chunks
+                .iter()
+                .filter(|c| !completed.contains(&c.id))
+                .map(|c| c.id)
+                .collect(),
+        ));
 
-        // Stream 0 ascending, stream 1 descending
-        s0_ids.sort_unstable();
-        s1_ids.sort_unstable_by(|a, b| b.cmp(a));
+        let mut join_set = JoinSet::new();
 
-        let tid = manifest.transfer_id.clone();
-        let ip = target.ip.clone();
+        for worker_id in 0..NUM_STREAMS {
+            let queue  = queue.clone();
+            let fm     = fm.clone();
+            let fp     = file_path.clone();
+            let tid    = manifest.transfer_id.clone();
+            let ip     = target.ip.clone();
+            let app_w  = app.clone();
 
-        // Clone everything for the two spawned tasks
-        let fm0 = fm.clone();
-        let fm1 = fm.clone();
-        let fp0 = file_path.clone();
-        let fp1 = file_path.clone();
-        let tid0 = tid.clone();
-        let tid1 = tid.clone();
-        let ip0 = ip.clone();
-        let ip1 = ip.clone();
-        let app0 = app.clone();
-        let app1 = app.clone();
+            join_set.spawn(async move {
+                stream_worker(tid, fi, worker_id as u8, queue, fm, fp, ip, STREAM_PORT, app_w)
+                    .await
+            });
+        }
 
-        let task0 = tokio::spawn(async move {
-            send_stream(tid0, fi, 0, s0_ids, fm0, fp0, ip0, STREAM_PORT, app0).await
-        });
-        let task1 = tokio::spawn(async move {
-            send_stream(tid1, fi, 1, s1_ids, fm1, fp1, ip1, STREAM_PORT, app1).await
-        });
+        // Await all workers.  The first error propagates; dropping the
+        // JoinSet cancels any still-running workers (Tokio abort on drop).
+        while let Some(result) = join_set.join_next().await {
+            result??; // JoinError (panic/cancel) then anyhow::Error
+        }
 
-        let (r0, r1) = tokio::join!(task0, task1);
-        r0??;
-        r1??;
-
-        eprintln!("[StreamClient] File {fi} fully sent");
+        eprintln!("[StreamClient] File {fi} — all workers finished");
     }
 
     Ok(())
 }
 
-/// Send one stream's worth of chunks to the receiver.
-async fn send_stream(
+/// A single stream worker.
+///
+/// Connects to the receiver's stream server, performs the RIFT-STREAM
+/// handshake, then loops: pop a chunk ID from the shared queue, read the
+/// chunk bytes from the source file, send the CHUNK header + bytes, wait for
+/// ACK.  When the queue is empty, sends DONE and returns.
+///
+/// The worker opens its own `tokio::fs::File` for the source; two workers
+/// reading the same file concurrently via separate handles is safe on all
+/// major OS's.
+async fn stream_worker(
     transfer_id: String,
-    file_index: usize,
-    stream_id: u8,
-    chunk_ids: Vec<usize>,
+    file_index:  usize,
+    worker_id:   u8,
+    queue:       Arc<Mutex<VecDeque<usize>>>,
     file_manifest: Arc<FileManifest>,
-    file_path: String,
-    target_ip: String,
-    port: u16,
-    app: AppHandle,
+    file_path:   String,
+    target_ip:   String,
+    port:        u16,
+    app:         AppHandle,
 ) -> anyhow::Result<()> {
-    if chunk_ids.is_empty() {
-        eprintln!(
-            "[StreamClient] stream {stream_id} has no chunks to send for file {file_index}"
-        );
-        return Ok(());
-    }
-
+    // ── Connect ───────────────────────────────────────────────────────────────
     let addr = format!("{target_ip}:{port}");
-
     let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr))
         .await
-        .map_err(|_| anyhow::anyhow!("[StreamClient] Connect to {addr} timed out"))??;
+        .map_err(|_| anyhow::anyhow!("Connect to {addr} timed out"))??;
 
     let (read_half, mut writer) = tcp.into_split();
     let mut reader = BufReader::new(read_half);
-    let mut line = String::new();
+    let mut line   = String::new();
 
-    // Handshake
+    // ── Handshake ─────────────────────────────────────────────────────────────
     writer
         .write_all(
             format!(
-                "RIFT-STREAM/1.0\n{transfer_id}\n{file_index}\n{stream_id}\n"
+                "RIFT-STREAM/1.0\n{transfer_id}\n{file_index}\n{worker_id}\n"
             )
             .as_bytes(),
         )
@@ -137,42 +138,51 @@ async fn send_stream(
     reader.read_line(&mut line).await?;
     if line.trim() != "READY" {
         anyhow::bail!(
-            "[StreamClient] Expected READY, got: {}",
+            "[StreamClient] Worker {worker_id}: expected READY, got: {}",
             line.trim()
         );
     }
 
+    // ── Source file handle (per worker, read-only) ────────────────────────────
+    let mut src_file = tokio::fs::File::open(&file_path)
+        .await
+        .map_err(|e| anyhow::anyhow!("Cannot open source {file_path}: {e}"))?;
+
     eprintln!(
-        "[StreamClient] Stream {stream_id} ready — sending {} chunks for file {file_index}",
-        chunk_ids.len()
+        "[StreamClient] Worker {worker_id} ready — file {file_index} transfer {transfer_id}"
     );
 
-    // Open source file once, seek to each chunk on demand
-    let mut file = tokio::fs::File::open(&file_path)
-        .await
-        .map_err(|e| anyhow::anyhow!("Cannot open {file_path}: {e}"))?;
-
-    for &chunk_id in &chunk_ids {
-        let chunk_info = match file_manifest.chunks.get(chunk_id) {
-            Some(c) => c,
-            None => {
-                anyhow::bail!("Chunk {chunk_id} not in manifest");
-            }
+    // ── Chunk dispatch loop ───────────────────────────────────────────────────
+    loop {
+        // Pop the next job from the shared queue.
+        let chunk_id = {
+            let mut q = queue.lock().await;
+            q.pop_front()
         };
 
-        // Seek to the chunk's position in the source file
-        file.seek(tokio::io::SeekFrom::Start(chunk_info.offset))
+        let Some(chunk_id) = chunk_id else {
+            // Queue exhausted — this worker is done.
+            break;
+        };
+
+        let chunk_info = file_manifest
+            .chunks
+            .get(chunk_id)
+            .ok_or_else(|| anyhow::anyhow!("Chunk {chunk_id} not in manifest"))?;
+
+        // Read chunk bytes from source file.
+        src_file
+            .seek(tokio::io::SeekFrom::Start(chunk_info.offset))
             .await
-            .map_err(|e| {
-                anyhow::anyhow!("seek to {} for chunk {chunk_id}: {e}", chunk_info.offset)
-            })?;
+            .map_err(|e| anyhow::anyhow!("Seek source chunk {chunk_id}: {e}"))?;
 
         let mut buf = vec![0u8; chunk_info.size as usize];
-        file.read_exact(&mut buf)
+        src_file
+            .read_exact(&mut buf)
             .await
-            .map_err(|e| anyhow::anyhow!("read chunk {chunk_id}: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("Read source chunk {chunk_id}: {e}"))?;
 
-        // Send the CHUNK header
+        // Send CHUNK header then raw bytes.
         writer
             .write_all(
                 format!(
@@ -182,41 +192,46 @@ async fn send_stream(
                 .as_bytes(),
             )
             .await?;
-
-        // Send raw bytes
         writer.write_all(&buf).await?;
 
-        // Wait for ACK with timeout
+        // Wait for ACK (or NACK).
         line.clear();
-        let read_result = tokio::time::timeout(ACK_TIMEOUT, reader.read_line(&mut line)).await;
-        match read_result {
-            Err(_) => anyhow::bail!("ACK timeout for chunk {chunk_id}"),
-            Ok(Err(e)) => anyhow::bail!("Read ACK error for chunk {chunk_id}: {e}"),
-            Ok(Ok(0)) => anyhow::bail!("Connection closed before ACK for chunk {chunk_id}"),
-            Ok(Ok(_)) => {}
-        }
-
-        let resp = line.trim();
-        if resp.starts_with("NACK") {
-            // The receiver rejected this chunk (hash mismatch). The resume
-            // mechanism will retry it in the next session.
-            anyhow::bail!("Chunk {chunk_id} NACKed by receiver: {resp}");
+        match tokio::time::timeout(ACK_TIMEOUT, reader.read_line(&mut line)).await {
+            Err(_) => anyhow::bail!(
+                "Worker {worker_id}: ACK timeout for chunk {chunk_id}"
+            ),
+            Ok(Err(e)) => anyhow::bail!(
+                "Worker {worker_id}: ACK read error chunk {chunk_id}: {e}"
+            ),
+            Ok(Ok(0)) => anyhow::bail!(
+                "Worker {worker_id}: connection closed before ACK for chunk {chunk_id}"
+            ),
+            Ok(Ok(_)) => {
+                let resp = line.trim();
+                if resp.starts_with("NACK") {
+                    anyhow::bail!(
+                        "Worker {worker_id}: chunk {chunk_id} NACKed: {resp}"
+                    );
+                }
+                // ACK received — loop to next chunk.
+            }
         }
 
         let _ = app.emit(
             "chunk_sent",
             &serde_json::json!({
                 "transferId": transfer_id,
-                "fileIndex": file_index,
-                "chunkId": chunk_id,
-                "streamId": stream_id,
+                "fileIndex":  file_index,
+                "chunkId":    chunk_id,
+                "workerId":   worker_id,
             }),
         );
     }
 
-    // Signal end of this stream
+    // ── Signal end-of-stream ──────────────────────────────────────────────────
     writer.write_all(b"DONE\n").await?;
-    eprintln!("[StreamClient] Stream {stream_id} DONE for file {file_index}");
-
+    eprintln!(
+        "[StreamClient] Worker {worker_id} DONE — file {file_index} transfer {transfer_id}"
+    );
     Ok(())
 }

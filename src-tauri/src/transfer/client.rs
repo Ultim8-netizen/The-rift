@@ -1,21 +1,16 @@
 //! Dual-stream TCP file sender.
 //!
-//! Opens two independent TCP connections to the receiver's stream server.
-//! Stream 0 sends chunks in ascending order (forward from the start of the file).
-//! Stream 1 sends chunks in descending order (backward from the end of the file).
+//! Builds a transfer manifest, negotiates with the receiver, then delegates
+//! the actual byte transfer to `send_multi_stream`.
 
 use crate::state::{Device, FileEntry, SharedState};
 use crate::transfer::manifest::{build_manifest, ResumeManifest, SenderDevice};
-use crate::transfer::stream_client::send_dual_stream;
+use crate::transfer::stream_client::{send_multi_stream, NUM_STREAMS};
 use tauri::{AppHandle, Emitter};
 
-/// Returns the local IP address that the OS would use to send traffic to `target_ip`.
-/// Uses a connected UDP socket — no data is ever sent; the OS resolves the route
-/// and the socket's local address reveals which interface would be used.
-///
-/// This is far more reliable than `local_ip_address::local_ip()` on machines with
-/// multiple interfaces (WiFi + Ethernet + virtual adapters + link-local addresses),
-/// where the "primary" IP is often not the one reachable from the target subnet.
+/// Returns the local IP that the OS would route through to reach `target_ip`.
+/// Uses a connected UDP socket — no data is sent; the OS resolves the
+/// routing table and the socket's local address reveals the correct interface.
 fn outbound_ip_for(target_ip: &str) -> String {
     use std::net::UdpSocket;
 
@@ -31,7 +26,6 @@ fn outbound_ip_for(target_ip: &str) -> String {
         }
     }
 
-    // Fallback — less reliable on multi-interface machines but better than crashing
     let fallback = local_ip_address::local_ip()
         .unwrap_or_else(|_| "127.0.0.1".parse().unwrap())
         .to_string();
@@ -51,12 +45,6 @@ pub async fn send_files_to_device(
         (s.own_id.clone(), s.own_device_name.clone(), s.own_port)
     };
 
-    // ── KEY FIX ──────────────────────────────────────────────────────────────
-    // Do NOT use local_ip_address::local_ip() here. That returns the default-route
-    // interface IP, which on multi-interface machines (common on Windows with hotspot,
-    // Ethernet, VPN, etc.) is likely NOT the IP reachable from the target device.
-    // Instead, ask the OS which interface it would use to reach target.ip — that
-    // is the IP the receiver must use when POSTing /accept back to us.
     let own_ip = outbound_ip_for(&target.ip);
 
     let sender_device_full = Device {
@@ -75,6 +63,7 @@ pub async fn send_files_to_device(
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
+    // ── Notify receiver ───────────────────────────────────────────────────────
     let req_url = format!("http://{}:{}/request", target.ip, target.port);
     let req_body = crate::state::TransferRequest {
         transfer_id: transfer_id.clone(),
@@ -108,12 +97,9 @@ pub async fn send_files_to_device(
         }),
     );
 
+    // ── Wait for accept/decline ───────────────────────────────────────────────
     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
-    state
-        .lock()
-        .await
-        .transfer_notifiers
-        .insert(transfer_id.clone(), tx);
+    state.lock().await.transfer_notifiers.insert(transfer_id.clone(), tx);
 
     let accepted = match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
         Ok(Ok(v)) => v,
@@ -134,6 +120,7 @@ pub async fn send_files_to_device(
         return Ok(());
     }
 
+    // ── Build manifest (includes NUM_STREAMS so receiver knows expected DONEs) ─
     let sender_device_manifest = SenderDevice {
         id: own_id.clone(),
         name: own_name.clone(),
@@ -152,10 +139,12 @@ pub async fn send_files_to_device(
         transfer_id.clone(),
         sender_device_manifest,
         &file_tuples,
+        NUM_STREAMS,
     )
     .await
     .map_err(|e| anyhow::anyhow!("Manifest build failed: {e}"))?;
 
+    // ── Exchange manifest with receiver ───────────────────────────────────────
     let manifest_url = format!("http://{}:{}/manifest", target.ip, target.port);
     let resume: ResumeManifest = http
         .post(&manifest_url)
@@ -167,13 +156,13 @@ pub async fn send_files_to_device(
         .await
         .map_err(|e| anyhow::anyhow!("Deserialize ResumeManifest failed: {e}"))?;
 
-    eprintln!("[Client] Manifest accepted by receiver — launching dual streams");
+    eprintln!("[Client] Manifest accepted — launching {NUM_STREAMS} stream workers");
 
     let file_paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
 
-    send_dual_stream(&manifest, &resume, &target, &file_paths, &app)
+    send_multi_stream(&manifest, &resume, &target, &file_paths, &app)
         .await
-        .map_err(|e| anyhow::anyhow!("Dual-stream send failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Multi-stream send failed: {e}"))?;
 
     eprintln!("[Client] Transfer {transfer_id} send phase complete");
     Ok(())
@@ -191,7 +180,6 @@ pub async fn send_text_to_device(
         (s.own_id.clone(), s.own_device_name.clone(), s.own_port)
     };
 
-    // Same fix: use outbound IP for the target, not the default-route IP
     let own_ip = outbound_ip_for(&target.ip);
 
     let client = reqwest::Client::builder()
