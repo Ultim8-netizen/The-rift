@@ -1,3 +1,4 @@
+mod android_fs;
 mod discovery;
 mod network;
 mod state;
@@ -24,18 +25,29 @@ async fn get_app_state(state: State<'_, SharedState>) -> Result<AppStatePayload,
     })
 }
 
+/// Returns display name and byte size for each path.
+///
+/// On Android the file picker returns content:// URIs. std::fs::metadata
+/// returns 0 for these and std::path gives a garbage "file name" (the last
+/// URI segment). This command calls android_fs::get_file_info via
+/// spawn_blocking so ContentResolver.query runs on a blocking thread and the
+/// async executor is not blocked.
 #[tauri::command]
 async fn get_file_metadata(paths: Vec<String>) -> Result<Vec<StagedFile>, String> {
     let mut out = Vec::new();
     for path in paths {
-        let p = std::path::Path::new(&path);
-        let name = p
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        out.push(StagedFile { name, path, size_bytes: size });
+        let p = path.clone();
+        let info = tokio::task::spawn_blocking(move || android_fs::get_file_info(&p))
+            .await
+            .unwrap_or_else(|_| android_fs::FileInfo {
+                name: "unknown".to_string(),
+                size: 0,
+            });
+        out.push(StagedFile {
+            name: info.name,
+            path,
+            size_bytes: info.size,
+        });
     }
     Ok(out)
 }
@@ -91,6 +103,14 @@ async fn rescan(
     Ok(())
 }
 
+/// Sends files to a discovered peer.
+///
+/// On Android, file paths from the picker are content:// URIs. Before
+/// building the FileEntry list we resolve each URI to a real path via
+/// android_fs::resolve_paths (JNI → ContentResolver.openInputStream →
+/// cache copy). The temp files are deleted after the transfer finishes,
+/// succeeds or fails. Errors from the transfer task are surfaced to the
+/// frontend as transfer_error events.
 #[tauri::command]
 async fn send_files(
     target_device_id: String,
@@ -108,33 +128,69 @@ async fn send_files(
         (t, s.own_id.clone())
     };
 
-    let files: Vec<state::FileEntry> = file_paths
-        .iter()
-        .map(|path| {
-            let p = std::path::Path::new(path);
-            let name = p
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("file")
-                .to_string();
-            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            state::FileEntry {
-                name,
-                path: path.clone(),
-                size_bytes: size,
-                mime_type: "application/octet-stream".to_string(),
-            }
+    // Resolve content:// URIs to real file paths.
+    // On non-Android or for regular fs paths this is a cheap stat call.
+    // On Android it copies each file to the app cache dir via JNI.
+    // We fail fast here (before spawning the transfer task) so the Tauri
+    // invoke itself rejects with a clear error message.
+    let resolved = android_fs::resolve_paths(&file_paths).await.map_err(|e| {
+        eprintln!("[Send] URI resolution failed: {e}");
+        e.to_string()
+    })?;
+
+    // Collect the temp paths before consuming `resolved`.
+    let temp_paths: Vec<Option<String>> = resolved.iter().map(|r| r.temp_path.clone()).collect();
+
+    let files: Vec<state::FileEntry> = resolved
+        .into_iter()
+        .map(|r| state::FileEntry {
+            name: r.name,
+            path: r.real_path,
+            size_bytes: r.size,
+            mime_type: "application/octet-stream".to_string(),
         })
         .collect();
 
     let transfer_id = uuid::Uuid::new_v4().to_string();
     let state_clone = state.inner().clone();
+    let app_clone = app.clone();
+    let tid = transfer_id.clone();
 
     tauri::async_runtime::spawn(async move {
-        if let Err(e) =
-            transfer::send_files_to_device(transfer_id, target, files, state_clone, app).await
-        {
-            eprintln!("[Send] Error: {e}");
+        let result = transfer::send_files_to_device(
+            tid.clone(),
+            target,
+            files,
+            state_clone,
+            app_clone.clone(),
+        )
+        .await;
+
+        // Delete any temporary cache copies created for Android content:// URIs.
+        // This runs regardless of transfer outcome.
+        for temp in &temp_paths {
+            if let Some(p) = temp {
+                if let Err(e) = tokio::fs::remove_file(p).await {
+                    eprintln!("[Send] Temp file cleanup failed ({p}): {e}");
+                }
+            }
+        }
+
+        match result {
+            Ok(()) => {}
+            Err(e) => {
+                let msg = e.to_string();
+                eprintln!("[Send] Transfer error: {e}");
+                // Declined transfers: handle_decline in server.rs already emitted
+                // transfer_error before it sent false on the notifier channel.
+                // Do not double-emit for that case.
+                if !msg.contains("declined by receiver") {
+                    let _ = app_clone.emit(
+                        "transfer_error",
+                        &serde_json::json!({ "transferId": tid, "message": msg }),
+                    );
+                }
+            }
         }
     });
 
@@ -344,6 +400,10 @@ pub fn run() {
             // Fix: WiFi/multicast/wake locks are already acquired by
             // RiftService.kt in onCreate() — before any Rust code runs.
             // There is nothing for Rust to do here.
+            //
+            // android_fs.rs does call ndk_context, but only from Tauri command
+            // handlers and spawn_blocking tasks — both guaranteed to run after
+            // the JNI context is fully initialised.
 
             let app_handle = app.handle().clone();
             let state_clone = shared_state.clone();
