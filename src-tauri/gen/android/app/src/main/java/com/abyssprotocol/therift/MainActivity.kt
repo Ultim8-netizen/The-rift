@@ -15,6 +15,15 @@ import androidx.core.content.ContextCompat
  * Compatible with API 24 (Android 7.0) through API 34+ (Android 14),
  * including Android Go edition devices.
  *
+ * Initialisation order:
+ *   1. super.onCreate() — Tauri loads the native .so and sets up the WebView.
+ *   2. RiftAndroidHelper.init(this) — stores the ApplicationContext AND calls
+ *      `nativeInitJvm()` which seeds the Rust-side JavaVM OnceLock.  This
+ *      MUST happen before any file-picker result is processed; see
+ *      android_fs.rs for details on why ndk_context cannot be used here.
+ *   3. handlePermissionsAndStartService() — requests runtime permissions and
+ *      starts RiftService.
+ *
  * Permission strategy:
  *   - Only runtime permissions are requested here. Install-time permissions
  *     (INTERNET, WAKE_LOCK, CHANGE_WIFI_MULTICAST_STATE, FOREGROUND_SERVICE)
@@ -37,6 +46,14 @@ class MainActivity : TauriActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.i(TAG, "MainActivity created — API ${Build.VERSION.SDK_INT}")
+
+        // Initialise the Android helper AFTER super.onCreate() so that the
+        // native library has been loaded by Tauri's Activity base class.
+        // This call stores the ApplicationContext (needed by ContentResolver
+        // operations) and seeds the Rust JavaVM OnceLock (needed by every
+        // JNI call originating from a Tokio blocking thread).
+        RiftAndroidHelper.init(this)
+
         handlePermissionsAndStartService()
     }
 
@@ -87,14 +104,16 @@ class MainActivity : TauriActivity() {
 
     private fun handlePermissionsAndStartService() {
         val missing = runtimePermissions().filter { perm ->
-            ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(this, perm) !=
+                PackageManager.PERMISSION_GRANTED
         }.toTypedArray()
 
         if (missing.isEmpty()) {
             Log.d(TAG, "All permissions already granted")
             startRiftService()
         } else {
-            Log.d(TAG, "Requesting ${missing.size} runtime permission(s): ${missing.joinToString()}")
+            Log.d(TAG,
+                "Requesting ${missing.size} runtime permission(s): ${missing.joinToString()}")
             ActivityCompat.requestPermissions(this, missing, PERMISSION_REQUEST_CODE)
         }
     }

@@ -4,26 +4,24 @@
 //! these directly — the kernel has no ContentResolver. This module resolves
 //! them to real file paths Rust can `File::open`.
 //!
-//! Strategy (Android only):
-//!   1. `get_file_info` — ContentResolver.query for display name + size.
-//!      Fast, no copy. Use for the metadata command.
-//!   2. `resolve_paths` — copies each URI into the app cache dir via
-//!      ContentResolver.openInputStream. Returns a real path + cleanup handle.
-//!      Use before building FileEntry for transfer.
+//! ── Android JVM initialisation ────────────────────────────────────────────
+//! The previous implementation called `ndk_context::android_context().vm()`
+//! to obtain the JavaVM pointer.  This caused a fatal SIGABRT with the
+//! message "android context was not initialized" the first time a file was
+//! selected, because `ndk_context` stores its state in process-global statics
+//! that are private to whichever .so called `initialize_android_context`.
+//! Tauri initialises its own copy; our cdylib has a separate copy that is
+//! never seeded.
 //!
-//! Non-Android: trivial std::fs wrappers — zero overhead.
-//!
-//! ── Cargo.toml requirement ────────────────────────────────────────────────
-//! Add these two lines under your EXISTING android dependencies section, or
-//! create it if it does not exist:
-//!
-//!   [target.'cfg(target_os = "android")'.dependencies]
-//!   ndk-context = "0.1"
-//!   jni = { version = "0.21", default-features = false }
-//!
-//! Both are already transitive dependencies of Tauri for Android targets.
-//! Adding them explicitly makes them addressable from this crate.
+//! Fix: `RiftAndroidHelper.init()` in Kotlin calls the JNI function
+//! `nativeInitJvm()`, whose Rust implementation stores the `JavaVM` in our
+//! own `OnceLock`.  All subsequent JNI calls on any Tokio thread use that
+//! stored pointer instead of ndk_context.  The `ndk-context` crate remains
+//! in Cargo.toml as a transitive dependency of Tauri but is no longer used
+//! directly from this file.
 //! ─────────────────────────────────────────────────────────────────────────
+
+use std::sync::OnceLock;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -42,6 +40,45 @@ pub struct ResolvedFile {
     /// Absolute path of the temp cache copy we created, if any.
     /// The caller MUST delete this file after the transfer completes.
     pub temp_path: Option<String>,
+}
+
+// ── Android JVM storage ───────────────────────────────────────────────────────
+
+/// Stores the `JavaVM` pointer supplied by `RiftAndroidHelper.nativeInitJvm()`.
+///
+/// `jni::JavaVM` is `Send + Sync` (it wraps a process-wide singleton pointer),
+/// so placing it in a `static OnceLock` is safe.
+#[cfg(target_os = "android")]
+static JVM_GLOBAL: OnceLock<jni::JavaVM> = OnceLock::new();
+
+/// JNI export called from Kotlin as `RiftAndroidHelper.nativeInitJvm()`.
+///
+/// This is the ONLY place `JavaVM` is captured.  It must be called from the
+/// main thread (inside `MainActivity.onCreate`, after `super.onCreate`) so
+/// that the JNI environment is fully set up before any Tokio worker thread
+/// attempts a file-picker operation.
+///
+/// If the `OnceLock` is already populated (e.g. on a configuration-change
+/// Activity recreation) the call is a no-op.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_nativeInitJvm<'local>(
+    env: jni::JNIEnv<'local>,
+    _class: jni::objects::JClass<'local>,
+) {
+    match env.get_java_vm() {
+        Ok(vm) => {
+            // OnceLock::set returns Err if already set — that is fine.
+            if JVM_GLOBAL.set(vm).is_ok() {
+                eprintln!("[AndroidFS] JavaVM stored — JNI file ops enabled");
+            }
+        }
+        Err(e) => {
+            // Non-fatal: log and continue.  File operations will return a
+            // descriptive error rather than aborting the process.
+            eprintln!("[AndroidFS] get_java_vm failed: {e:?}");
+        }
+    }
 }
 
 // ── get_file_info (sync — wrap in spawn_blocking from async contexts) ─────────
@@ -114,22 +151,29 @@ async fn resolve_single(path: &str) -> anyhow::Result<ResolvedFile> {
 
 // ── Android JNI implementation ────────────────────────────────────────────────
 
+/// Attaches the current thread to the JavaVM and runs `f` with a valid
+/// `JNIEnv`.
+///
+/// Uses `JVM_GLOBAL` (populated by `nativeInitJvm`) instead of
+/// `ndk_context::android_context()`.  Returns a descriptive `Err` rather
+/// than aborting the process if initialisation has not yet occurred.
+///
+/// `attach_current_thread` is idempotent: if the calling thread is already
+/// attached, it returns the existing env.  The `AttachGuard` only detaches
+/// on drop if *this call* was responsible for attaching, so there is no risk
+/// of detaching a thread that Tauri's runtime is mid-flight on.
 #[cfg(target_os = "android")]
 fn with_jni<F, R>(f: F) -> anyhow::Result<R>
 where
     F: FnOnce(&mut jni::JNIEnv<'_>) -> anyhow::Result<R>,
 {
-    // Safety: ndk_context is populated by Tauri's Android runtime during app
-    // startup, before any Tauri command (and therefore any JNI call from this
-    // module) can be dispatched. All callers run on spawn_blocking threads or
-    // Tauri command handler threads — both guaranteed to be post-init.
-    let vm_ptr = unsafe { ndk_context::android_context().vm() };
-    let jvm = unsafe { jni::JavaVM::from_raw(vm_ptr.cast()) }
-        .map_err(|e| anyhow::anyhow!("JavaVM::from_raw failed: {e:?}"))?;
+    let jvm = JVM_GLOBAL.get().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Android JVM not initialised — ensure RiftAndroidHelper.init() is called \
+             from MainActivity.onCreate() before any file operation is attempted"
+        )
+    })?;
 
-    // attach_current_thread is idempotent: safe on already-attached threads.
-    // The returned AttachGuard detaches on drop only if this call attached the
-    // thread — prevents double-detach on threads that belong to the JVM.
     let mut env = jvm
         .attach_current_thread()
         .map_err(|e| anyhow::anyhow!("attach_current_thread failed: {e:?}"))?;
@@ -198,7 +242,10 @@ fn android_query_uri_info(uri: &str) -> FileInfo {
         }
         Err(e) => {
             eprintln!("[AndroidFS] queryUriInfo JNI error: {e}");
-            FileInfo { name: "unknown".to_string(), size: 0 }
+            FileInfo {
+                name: "unknown".to_string(),
+                size: 0,
+            }
         }
     }
 }
@@ -234,13 +281,14 @@ fn android_copy_uri(uri: &str) -> anyhow::Result<ResolvedFile> {
     // Prefer the size from the actual cache file; ContentResolver sometimes
     // returns 0 for SIZE (e.g. cloud-backed documents not yet downloaded).
     let actual_size = if declared_size == 0 {
-        std::fs::metadata(&cache_path).map(|m| m.len()).unwrap_or(0)
+        std::fs::metadata(&cache_path)
+            .map(|m| m.len())
+            .unwrap_or(0)
     } else {
         declared_size
     };
 
     if actual_size == 0 {
-        // Delete the empty cache file immediately — nothing to transfer.
         let _ = std::fs::remove_file(&cache_path);
         anyhow::bail!("'{name}' appears to be empty (0 bytes). Nothing to send.");
     }

@@ -11,12 +11,23 @@ import java.io.IOException
  * JNI-accessible singleton. Provides ContentResolver access for content:// URIs
  * returned by the Android file picker (which Rust cannot open directly).
  *
- * init() MUST be called from MainActivity.onCreate() before any Tauri command
- * fires. All @JvmStatic methods are called from android_fs.rs via JNI.
+ * Initialisation order (must be followed exactly):
+ *   1. `init()` is called from `MainActivity.onCreate()` after `super.onCreate()`.
+ *   2. `init()` stores `appContext` and then calls `nativeInitJvm()`.
+ *   3. `nativeInitJvm()` (implemented in android_fs.rs) stores the `JavaVM`
+ *      pointer in a Rust `OnceLock` that all Tokio blocking threads can access.
  *
- * Thread safety: init() is called once on the main thread. The JNI methods run
- * on spawn_blocking threads (Tokio blocking pool) — both only read appContext
- * after init, which is safe because ApplicationContext is immutable once set.
+ * Why `nativeInitJvm()` instead of `ndk_context`:
+ *   The `ndk_context` crate stores its JVM pointer in statics that are private
+ *   to a given .so linkage unit. Tauri initialises its own copy, but our
+ *   cdylib has a separate copy that is never seeded, causing a fatal SIGABRT
+ *   ("android context was not initialized") the first time a file is selected.
+ *   Calling `nativeInitJvm()` from the Java side seeds our copy directly.
+ *
+ * Thread safety: `init()` is called once on the main thread. The @JvmStatic
+ * methods are called from spawn_blocking threads (Tokio blocking pool) — both
+ * only read `appContext` after init, which is safe because ApplicationContext
+ * is immutable once set.
  */
 object RiftAndroidHelper {
 
@@ -25,11 +36,45 @@ object RiftAndroidHelper {
     @Volatile
     private var appContext: Context? = null
 
+    // ── Native initialisation ─────────────────────────────────────────────────
+
+    /**
+     * Implemented in android_fs.rs as
+     * `Java_com_abyssprotocol_therift_RiftAndroidHelper_nativeInitJvm`.
+     *
+     * Stores the current JNIEnv's JavaVM pointer in a Rust OnceLock so that
+     * Tokio blocking threads can attach to the JVM when performing file
+     * operations. Must be called after the native library has been loaded
+     * (i.e. after `TauriActivity.super.onCreate()` returns).
+     */
+    @JvmStatic
+    private external fun nativeInitJvm()
+
+    // ── Public API ────────────────────────────────────────────────────────────
+
+    /**
+     * Initialises this singleton. Must be called from `MainActivity.onCreate()`
+     * immediately after `super.onCreate(savedInstanceState)` returns.
+     *
+     * The call to `nativeInitJvm()` is wrapped in a try-catch so that a
+     * missing native symbol (e.g. during a stripped release build with
+     * mis-configured ProGuard) produces a log warning rather than a crash.
+     */
     @JvmStatic
     fun init(ctx: Context) {
         appContext = ctx.applicationContext
-        Log.i(TAG, "Initialized")
+        try {
+            nativeInitJvm()
+            Log.i(TAG, "JVM initialised for native file operations")
+        } catch (e: UnsatisfiedLinkError) {
+            // Native library not yet loaded — log and continue. File operations
+            // will return a descriptive error from Rust rather than aborting.
+            Log.e(TAG, "nativeInitJvm: native library not loaded — ${e.message}")
+        }
+        Log.i(TAG, "RiftAndroidHelper initialised")
     }
+
+    // ── JNI-accessible helpers ────────────────────────────────────────────────
 
     /**
      * Queries display name and size for a content:// URI via ContentResolver.
@@ -114,7 +159,9 @@ object RiftAndroidHelper {
             )
 
             val inputStream = ctx.contentResolver.openInputStream(uri)
-                ?: throw IOException("ContentResolver returned null InputStream for $uriString")
+                ?: throw IOException(
+                    "ContentResolver returned null InputStream for $uriString"
+                )
 
             inputStream.use { input ->
                 cacheFile.outputStream().use { output ->
@@ -122,7 +169,8 @@ object RiftAndroidHelper {
                 }
             }
 
-            Log.i(TAG, "Copied $uriString → ${cacheFile.absolutePath} (${cacheFile.length()} B)")
+            Log.i(TAG,
+                "Copied $uriString → ${cacheFile.absolutePath} (${cacheFile.length()} B)")
             cacheFile.absolutePath
         } catch (e: Exception) {
             Log.e(TAG, "copyUriToCache failed for $uriString: ${e.message}")
