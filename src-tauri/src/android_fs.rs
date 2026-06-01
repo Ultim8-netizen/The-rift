@@ -20,9 +20,6 @@
 //! in Cargo.toml as a transitive dependency of Tauri but is no longer used
 //! directly from this file.
 //! ─────────────────────────────────────────────────────────────────────────
-
-use std::sync::OnceLock;
-
 // ── Public types ──────────────────────────────────────────────────────────────
 
 pub struct FileInfo {
