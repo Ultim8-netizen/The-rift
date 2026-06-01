@@ -25,13 +25,6 @@ async fn get_app_state(state: State<'_, SharedState>) -> Result<AppStatePayload,
     })
 }
 
-/// Returns display name and byte size for each path.
-///
-/// On Android the file picker returns content:// URIs. std::fs::metadata
-/// returns 0 for these and std::path gives a garbage "file name" (the last
-/// URI segment). This command calls android_fs::get_file_info via
-/// spawn_blocking so ContentResolver.query runs on a blocking thread and the
-/// async executor is not blocked.
 #[tauri::command]
 async fn get_file_metadata(paths: Vec<String>) -> Result<Vec<StagedFile>, String> {
     let mut out = Vec::new();
@@ -103,14 +96,6 @@ async fn rescan(
     Ok(())
 }
 
-/// Sends files to a discovered peer.
-///
-/// On Android, file paths from the picker are content:// URIs. Before
-/// building the FileEntry list we resolve each URI to a real path via
-/// android_fs::resolve_paths (JNI → ContentResolver.openInputStream →
-/// cache copy). The temp files are deleted after the transfer finishes,
-/// succeeds or fails. Errors from the transfer task are surfaced to the
-/// frontend as transfer_error events.
 #[tauri::command]
 async fn send_files(
     target_device_id: String,
@@ -128,17 +113,11 @@ async fn send_files(
         (t, s.own_id.clone())
     };
 
-    // Resolve content:// URIs to real file paths.
-    // On non-Android or for regular fs paths this is a cheap stat call.
-    // On Android it copies each file to the app cache dir via JNI.
-    // We fail fast here (before spawning the transfer task) so the Tauri
-    // invoke itself rejects with a clear error message.
     let resolved = android_fs::resolve_paths(&file_paths).await.map_err(|e| {
         eprintln!("[Send] URI resolution failed: {e}");
         e.to_string()
     })?;
 
-    // Collect the temp paths before consuming `resolved`.
     let temp_paths: Vec<Option<String>> = resolved.iter().map(|r| r.temp_path.clone()).collect();
 
     let files: Vec<state::FileEntry> = resolved
@@ -152,6 +131,46 @@ async fn send_files(
         .collect();
 
     let transfer_id = uuid::Uuid::new_v4().to_string();
+
+    // ── CHANGE 1: emit transfer_started so the sender sees their own transfer ──
+    // Build the JSON payload before `files` and `target` are moved into the
+    // async closure.  direction = "outgoing" → frontend renders TX badge and
+    // routes progress updates via the chunk_sent / transfer_overseer_verified
+    // path rather than the receiver path.
+    {
+        let total_bytes: u64 = files.iter().map(|f| f.size_bytes).sum();
+        let files_json: Vec<serde_json::Value> = files
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    "name":      f.name,
+                    "path":      f.path,
+                    "sizeBytes": f.size_bytes,
+                    "mimeType":  f.mime_type,
+                })
+            })
+            .collect();
+        let _ = app.emit(
+            "transfer_started",
+            &serde_json::json!({
+                "id":               transfer_id,
+                "direction":        "outgoing",
+                "status":           "queued",
+                "files":            files_json,
+                "targetDevice":     &target,
+                "senderDevice":     serde_json::Value::Null,
+                "totalBytes":       total_bytes,
+                "bytesTransferred": 0,
+                "speedBytesPerSec": 0,
+                "etaSeconds":       serde_json::Value::Null,
+                "startedAt":        serde_json::Value::Null,
+                "completedAt":      serde_json::Value::Null,
+                "errorMessage":     serde_json::Value::Null,
+                "savePath":         serde_json::Value::Null,
+            }),
+        );
+    }
+
     let state_clone = state.inner().clone();
     let app_clone = app.clone();
     let tid = transfer_id.clone();
@@ -166,8 +185,6 @@ async fn send_files(
         )
         .await;
 
-        // Delete any temporary cache copies created for Android content:// URIs.
-        // This runs regardless of transfer outcome.
         for temp in &temp_paths {
             if let Some(p) = temp {
                 if let Err(e) = tokio::fs::remove_file(p).await {
@@ -181,10 +198,19 @@ async fn send_files(
             Err(e) => {
                 let msg = e.to_string();
                 eprintln!("[Send] Transfer error: {e}");
-                // Declined transfers: handle_decline in server.rs already emitted
-                // transfer_error before it sent false on the notifier channel.
-                // Do not double-emit for that case.
-                if !msg.contains("declined by receiver") {
+
+                // ── CHANGE 2: emit transfer_declined so the TX card updates ──
+                // Previously this branch was silently swallowed on the sender
+                // side (with a comment saying the receiver's server.rs already
+                // emitted transfer_error — but that emission targets the
+                // receiver's own app, not ours).  The sender's transfer card
+                // was left in "queued" forever.
+                if msg.contains("declined by receiver") {
+                    let _ = app_clone.emit(
+                        "transfer_declined",
+                        &serde_json::json!({ "transferId": tid }),
+                    );
+                } else {
                     let _ = app_clone.emit(
                         "transfer_error",
                         &serde_json::json!({ "transferId": tid, "message": msg }),
@@ -390,21 +416,6 @@ pub fn run() {
             detect_hotspot,
         ])
         .setup(move |app| {
-            // ── REMOVED: acquire_wifi_locks() ────────────────────────────────
-            // The previous call here caused a fatal SIGABRT on Android 11:
-            //   Abort message: 'android context was not initialized'
-            // ndk_context::android_context() panics when called from a Tokio
-            // background thread (Thread-2) before Tauri has finished setting
-            // up the JNI context pointer. The panic aborts the process.
-            //
-            // Fix: WiFi/multicast/wake locks are already acquired by
-            // RiftService.kt in onCreate() — before any Rust code runs.
-            // There is nothing for Rust to do here.
-            //
-            // android_fs.rs does call ndk_context, but only from Tauri command
-            // handlers and spawn_blocking tasks — both guaranteed to run after
-            // the JNI context is fully initialised.
-
             let app_handle = app.handle().clone();
             let state_clone = shared_state.clone();
 

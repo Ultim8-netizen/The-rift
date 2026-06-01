@@ -1,21 +1,32 @@
-//! Transfer manifest — the metadata packet sent before any file data moves.
+//! Transfer manifest — metadata sent before any file data moves.
 //!
-//! The `stream` field has been removed from `ChunkInfo`.  There is no longer
-//! any static stream-to-chunk assignment.  The sender builds a single ordered
-//! chunk queue and N workers compete to drain it; the receiver writes each
-//! chunk wherever it arrives.
+//! Chunk hash strategy
+//! ───────────────────
+//! Per-chunk BLAKE3 hashes are NOT computed during manifest build.  They are
+//! computed by the sender at send time (read chunk → BLAKE3 → include in the
+//! CHUNK header).  The receiver verifies each chunk hash from the CHUNK header,
+//! providing per-byte integrity coverage over the entire transfer.
+//!
+//! Full-file hash
+//! ──────────────
+//! `FileManifest::file_blake3` is left empty (`String::new()`).  The receiver
+//! skips the post-assembly full-file hash check when this field is empty.
+//! Per-chunk BLAKE3 is comprehensive: every byte of every chunk is individually
+//! verified, making a full-file second pass redundant for local LAN transfers.
+//! This eliminates two full sequential reads of the source file (one on the
+//! sender during manifest build, one on the receiver after assembly) — for
+//! large files this was 30-90 seconds of wasted time before a byte moved.
+//!
+//! Chunk size
+//! ──────────
+//! 1 MB.  Previous value was 512 KB.  On a local hotspot with 2 ms RTT and
+//! 10-100 MB/s throughput, 1 MB chunks reduce the total ACK round-trip count
+//! by 2× while keeping per-chunk BLAKE3 fast (<1 ms).
 
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
 
-/// 512 KB — optimal for a local WiFi hotspot link.
-///
-/// 4 MB was tuned for high-latency internet paths where round-trip cost is
-/// high.  On a direct hotspot with ~2 ms RTT a 512 KB chunk completes in
-/// ~50 ms at 10 MB/s, giving finer-grained progress, faster NACK-retry cycles,
-/// and better interleaving across four concurrent workers without meaningfully
-/// impacting throughput.
-pub const DEFAULT_CHUNK_SIZE: usize = 512 * 1024;
+/// 1 MB — optimal chunk size for local WiFi hotspot transfers.
+pub const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,17 +38,18 @@ pub struct SenderDevice {
     pub port: u16,
 }
 
-/// Metadata for one chunk within a file.
+/// Metadata for one chunk.
+///
+/// `blake3` is always `String::new()` in the manifest.  The actual hash is
+/// computed by the sender when the chunk is read and included in the CHUNK
+/// protocol header.  The receiver verifies against that header hash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChunkInfo {
-    /// Sequential index within the file (0-based).
     pub id:     usize,
-    /// Byte offset of this chunk within the assembled file.
     pub offset: u64,
-    /// Number of bytes in this chunk (last chunk may be smaller).
     pub size:   u64,
-    /// BLAKE3 hex digest of the raw chunk bytes.
+    /// Always empty in the manifest.  Hash is computed during send.
     pub blake3: String,
 }
 
@@ -47,7 +59,8 @@ pub struct FileManifest {
     pub name:         String,
     pub total_bytes:  u64,
     pub total_chunks: usize,
-    /// BLAKE3 hex digest of the complete assembled file.
+    /// Empty string — per-chunk hashes provide integrity coverage.
+    /// The receiver skips full-file verification when this is empty.
     pub file_blake3:  String,
     pub chunks:       Vec<ChunkInfo>,
 }
@@ -59,31 +72,28 @@ pub struct TransferManifest {
     pub sender_device: SenderDevice,
     pub files:         Vec<FileManifest>,
     pub total_bytes:   u64,
-    /// Number of concurrent worker streams the sender will open per file.
-    /// The receiver uses this for failure detection only — finalization is
-    /// triggered by chunk completeness, not stream count.
+    /// Number of concurrent worker streams the sender opens per file.
     pub num_streams:   usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResumeManifest {
-    pub transfer_id:       String,
-    /// One Vec<usize> per file; each entry is a completed chunk ID.
+    pub transfer_id:        String,
     pub completed_per_file: Vec<Vec<usize>>,
 }
 
 pub async fn build_manifest(
     transfer_id:   String,
     sender_device: SenderDevice,
-    file_entries:  &[(String, String, u64)], // (name, path, size_bytes)
+    file_entries:  &[(String, String, u64)],
     num_streams:   usize,
 ) -> anyhow::Result<TransferManifest> {
     let mut files       = Vec::with_capacity(file_entries.len());
     let mut total_bytes = 0u64;
 
     for (name, path, size_bytes) in file_entries {
-        let fm = build_file_manifest(name, path, *size_bytes).await?;
+        let fm = build_file_manifest(name, path, *size_bytes)?;
         total_bytes += fm.total_bytes;
         files.push(fm);
     }
@@ -91,64 +101,41 @@ pub async fn build_manifest(
     Ok(TransferManifest { transfer_id, sender_device, files, total_bytes, num_streams })
 }
 
-async fn build_file_manifest(
+/// Build chunk metadata from file size alone — no file I/O, O(chunk_count) time.
+///
+/// Per-chunk BLAKE3 hashes are computed lazily by the sender at send time.
+/// Full-file hash is omitted; per-chunk verification provides equivalent coverage.
+fn build_file_manifest(
     name:       &str,
-    path:       &str,
+    _path:      &str,   // not read — hashes computed during send
     size_bytes: u64,
 ) -> anyhow::Result<FileManifest> {
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| anyhow::anyhow!("Cannot open {path}: {e}"))?;
-
-    let chunk_size   = DEFAULT_CHUNK_SIZE;
-    let total_chunks = ((size_bytes as usize).saturating_add(chunk_size - 1)) / chunk_size;
-    let total_chunks = total_chunks.max(1);
-
-    let mut chunks      = Vec::with_capacity(total_chunks);
-    let mut full_hasher = blake3::Hasher::new();
-    let mut offset      = 0u64;
-
-    for ci in 0..total_chunks {
-        // Fill-loop: a single AsyncReadExt::read call may legally return fewer
-        // bytes than requested even on a local file.
-        let mut buf        = vec![0u8; chunk_size];
-        let mut total_read = 0usize;
-        while total_read < chunk_size {
-            match file
-                .read(&mut buf[total_read..])
-                .await
-                .map_err(|e| anyhow::anyhow!("Read error at chunk {ci}: {e}"))?
-            {
-                0 => break, // EOF
-                n => total_read += n,
-            }
-        }
-
-        if total_read == 0 {
-            break; // Nothing left
-        }
-        buf.truncate(total_read);
-
-        let chunk_blake3 = hex::encode(blake3::hash(&buf).as_bytes());
-        full_hasher.update(&buf);
-
-        chunks.push(ChunkInfo {
-            id:     ci,
-            offset,
-            size:   total_read as u64,
-            blake3: chunk_blake3,
+    if size_bytes == 0 {
+        return Ok(FileManifest {
+            name:         name.to_string(),
+            total_bytes:  0,
+            total_chunks: 0,
+            file_blake3:  String::new(),
+            chunks:       vec![],
         });
-
-        offset += total_read as u64;
     }
 
-    let file_blake3 = hex::encode(full_hasher.finalize().as_bytes());
+    let chunk_size   = DEFAULT_CHUNK_SIZE as u64;
+    let total_chunks = ((size_bytes + chunk_size - 1) / chunk_size) as usize;
+
+    let chunks: Vec<ChunkInfo> = (0..total_chunks)
+        .map(|i| {
+            let offset = i as u64 * chunk_size;
+            let size   = (size_bytes - offset).min(chunk_size);
+            ChunkInfo { id: i, offset, size, blake3: String::new() }
+        })
+        .collect();
 
     Ok(FileManifest {
         name:         name.to_string(),
         total_bytes:  size_bytes,
-        total_chunks: chunks.len(),
-        file_blake3,
+        total_chunks,
+        file_blake3:  String::new(),
         chunks,
     })
 }

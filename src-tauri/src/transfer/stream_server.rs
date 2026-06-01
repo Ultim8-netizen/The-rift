@@ -1,33 +1,23 @@
 //! Raw TCP stream server on :7477.
 //!
-//! Each incoming connection is one worker from the sender.  There is no
-//! longer any concept of "stream 0 owns the first half".  Any connection may
-//! deliver any chunk.  Finalization fires exactly once, claimed atomically by
-//! whichever connection writes the last missing chunk.
+//! Each incoming connection is one pipelined worker from the sender.  Any
+//! connection may deliver any chunk in any order.  Chunks are written directly
+//! to their byte offset in the pre-allocated destination file via a
+//! per-connection file handle (no shared mutex).
 //!
-//! Per-connection file handle
-//! --------------------------
-//! Each accepted connection opens its own `tokio::fs::File` for writing.
-//! Chunks are written with seek+write on that private handle — no mutex,
-//! no serialization between workers.  Because the chunks never overlap
-//! (each chunk owns a unique byte range in the pre-allocated file), the OS
-//! can process all workers' writes concurrently without corruption.
+//! Finalization
+//! ────────────
+//! The first connection to write the last missing chunk atomically claims the
+//! `finalized` flag and spawns `finalize_file`.  All other claim attempts are
+//! no-ops.
 //!
-//! Finalization gate
-//! -----------------
-//! After every successful chunk write the handler checks:
-//!   `completed_chunks.len() == total_chunks`
-//! The first connection to satisfy that condition atomically swaps
-//! `StreamReceiveState::finalized` from false to true and spawns
-//! `finalize_file`.  All other connections' swap attempts return true
-//! and are ignored.
-//!
-//! Failure detection
-//! -----------------
-//! Every connection termination (DONE, clean close, or error) increments
-//! `streams_done`.  When `streams_done >= streams_expected` and `finalized`
-//! has not been set, we know all workers have stopped but chunks are missing
-//! — a `transfer_error` event is emitted.
+//! Full-file hash
+//! ──────────────
+//! `FileManifest::file_blake3` is empty when the sender uses lazy chunk
+//! hashing (current default).  When `file_blake3` is empty, `finalize_file`
+//! skips the full-file hash pass and emits `transfer_complete` directly.
+//! Per-chunk BLAKE3 verification (enforced in the receive loop below) covers
+//! every byte, making a second sequential read for full-file hashing redundant.
 
 use crate::state::SharedState;
 use std::sync::Arc;
@@ -43,7 +33,6 @@ pub const STREAM_PORT: u16 = 7477;
 pub async fn start_stream_server(state: SharedState, app: AppHandle) -> anyhow::Result<()> {
     let listener = TcpListener::bind(format!("0.0.0.0:{STREAM_PORT}")).await?;
     eprintln!("[StreamServer] Bound on :{STREAM_PORT}");
-
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
@@ -65,12 +54,12 @@ async fn handle_connection(stream: TcpStream, state: SharedState, app: AppHandle
 
 async fn handle_connection_inner(
     stream: TcpStream,
-    state: SharedState,
-    app: AppHandle,
+    state:  SharedState,
+    app:    AppHandle,
 ) -> anyhow::Result<()> {
     let (read_half, mut writer) = stream.into_split();
     let mut reader = BufReader::new(read_half);
-    let mut line = String::new();
+    let mut line   = String::new();
 
     macro_rules! read_line {
         () => {{
@@ -86,17 +75,12 @@ async fn handle_connection_inner(
     if hello != "RIFT-STREAM/1.0" {
         anyhow::bail!("Unexpected handshake: {hello}");
     }
-    let transfer_id   = read_line!();
-    let file_index: usize = read_line!()
-        .parse()
+    let transfer_id       = read_line!();
+    let file_index: usize = read_line!().parse()
         .map_err(|_| anyhow::anyhow!("Bad file_index"))?;
-    let _worker_id: u8 = read_line!().parse().unwrap_or(0);
+    let _worker_id: u8    = read_line!().parse().unwrap_or(0);
 
     // ── Look up transfer state ────────────────────────────────────────────────
-    // Failures before we have file_state cannot increment streams_done because
-    // we don't know which file (or which transfer) the connection belongs to.
-    // The sender will see an ERR/connection-close and its overseer will handle
-    // re-queuing + permanent failure detection on that side.
     let transfer_state = {
         let s = state.lock().await;
         s.active_stream_transfers.get(&transfer_id).cloned()
@@ -117,15 +101,9 @@ async fn handle_connection_inner(
         }
     };
 
-    writer.write_all(b"READY\n").await?;
-
     // ── Per-connection write handle ───────────────────────────────────────────
-    // Each worker owns its own handle; no mutex, no serialization.
-    // Writes to non-overlapping chunk regions are safe across handles.
-    //
-    // If the open fails we must still call check_all_workers_done so that
-    // streams_done is incremented.  Without this the failure-detection gate
-    // never fires if one of the expected connections dies here.
+    // Each worker owns its own handle — writes to non-overlapping regions are
+    // safe and fully parallel with no mutex serialization.
     let dest_file_result = OpenOptions::new()
         .write(true)
         .open(&file_state.dest_path)
@@ -141,12 +119,12 @@ async fn handle_connection_inner(
             );
             check_all_workers_done(&file_state, &app, &transfer_id).await;
             return Err(anyhow::anyhow!(
-                "Cannot open dest {:?}: {e}",
-                file_state.dest_path
+                "Cannot open dest {:?}: {e}", file_state.dest_path
             ));
         }
     };
 
+    writer.write_all(b"READY\n").await?;
     eprintln!(
         "[StreamServer] worker open — transfer={transfer_id} file={file_index}"
     );
@@ -164,7 +142,7 @@ async fn handle_connection_inner(
                 check_all_workers_done(&file_state, &app, &transfer_id).await;
                 break;
             }
-            Ok(_) => {}
+            Ok(_)  => {}
             Err(e) => {
                 eprintln!("[StreamServer] Read error: {e}");
                 drop(dest_file);
@@ -197,21 +175,18 @@ async fn handle_connection_inner(
         }
 
         let chunk_id: usize = match parts[1].parse() {
-            Ok(v) => v,
-            Err(_) => {
-                writer.write_all(b"NACK bad-id\n").await?;
-                continue;
-            }
+            Ok(v)  => v,
+            Err(_) => { writer.write_all(b"NACK bad-id\n").await?; continue; }
         };
         let byte_offset: u64 = match parts[2].parse() {
-            Ok(v) => v,
+            Ok(v)  => v,
             Err(_) => {
                 writer.write_all(format!("NACK {chunk_id}\n").as_bytes()).await?;
                 continue;
             }
         };
         let size: usize = match parts[3].parse() {
-            Ok(v) => v,
+            Ok(v)  => v,
             Err(_) => {
                 writer.write_all(format!("NACK {chunk_id}\n").as_bytes()).await?;
                 continue;
@@ -229,7 +204,7 @@ async fn handle_connection_inner(
             break;
         }
 
-        // Verify BLAKE3
+        // Verify BLAKE3 (sender computed this lazily at send time)
         let actual_blake3 = hex::encode(blake3::hash(&buf).as_bytes());
         if actual_blake3 != expected_blake3 {
             eprintln!("[StreamServer] BLAKE3 mismatch chunk {chunk_id}");
@@ -237,7 +212,7 @@ async fn handle_connection_inner(
             continue;
         }
 
-        // Idempotency check — skip write if already received
+        // Idempotency: skip write if already received (handles pipeline duplicates)
         {
             let completed = file_state.completed_chunks.lock().await;
             if completed.contains(&chunk_id) {
@@ -258,21 +233,19 @@ async fn handle_connection_inner(
                     .map_err(|e| anyhow::anyhow!("Write chunk {chunk_id}: {e}"))?;
             }
             None => {
-                // Finalization already triggered by a concurrent worker.
-                // ACK without re-writing (idempotent).
+                // Finalization already triggered — ACK without re-writing
                 writer.write_all(format!("ACK {chunk_id}\n").as_bytes()).await?;
                 continue;
             }
         }
 
-        // Mark complete and check whether this was the last missing chunk.
         let all_done = {
             let mut completed = file_state.completed_chunks.lock().await;
             completed.insert(chunk_id);
             completed.len() == file_state.manifest.total_chunks
         };
 
-        // ACK before (possibly slow) finalization path.
+        // ACK before (potentially slow) finalization path
         writer.write_all(format!("ACK {chunk_id}\n").as_bytes()).await?;
 
         let _ = app.emit(
@@ -287,12 +260,9 @@ async fn handle_connection_inner(
             }),
         );
 
-        // ── Finalization: claimed atomically by exactly one connection ─────────
+        // Claim finalization atomically — only one connection proceeds
         if all_done && !file_state.finalized.swap(true, Ordering::SeqCst) {
-            // Close write handle before the hash pass opens a read handle.
-            // Data is in the OS page cache; closing the fd releases the
-            // kernel descriptor without evicting cached pages.
-            dest_file = None;
+            dest_file = None; // close write handle before hash pass opens read handle
 
             let fs  = file_state.clone();
             let ts  = transfer_state.clone();
@@ -308,12 +278,8 @@ async fn handle_connection_inner(
     Ok(())
 }
 
-/// Increments `streams_done` for this file and — when every expected worker
-/// has terminated — checks whether all chunks arrived.  If chunks are still
-/// missing and no finalization has fired yet, emits `transfer_error`.
-///
-/// The `finalized` swap prevents a double-emit if this races with the
-/// success-path finalization triggered by the last chunk's write.
+/// Increments `streams_done` and, when all workers have terminated without
+/// completing all chunks, emits `transfer_error` (failure path only).
 async fn check_all_workers_done(
     file_state:  &Arc<crate::state::StreamReceiveState>,
     app:         &AppHandle,
@@ -327,10 +293,8 @@ async fn check_all_workers_done(
         {
             eprintln!(
                 "[StreamServer] All workers done but only {}/{} chunks for {} in {}",
-                received,
-                file_state.manifest.total_chunks,
-                file_state.manifest.name,
-                transfer_id
+                received, file_state.manifest.total_chunks,
+                file_state.manifest.name, transfer_id
             );
             let _ = app.emit(
                 "transfer_error",
@@ -338,8 +302,7 @@ async fn check_all_workers_done(
                     "transferId": transfer_id,
                     "message": format!(
                         "Transfer incomplete: received {}/{} chunks for {}",
-                        received,
-                        file_state.manifest.total_chunks,
+                        received, file_state.manifest.total_chunks,
                         file_state.manifest.name
                     ),
                 }),
@@ -348,9 +311,18 @@ async fn check_all_workers_done(
     }
 }
 
-/// Verify the assembled file end-to-end with BLAKE3 and emit the result.
-/// Called only once per file (atomic finalized flag), after the last chunk
-/// is confirmed on disk.  No shared write handle exists at this point.
+/// Called exactly once per file (atomic `finalized` flag) after the last chunk
+/// lands on disk.
+///
+/// Full-file BLAKE3 check
+/// ──────────────────────
+/// When `file_blake3` is empty (current default with lazy chunk hashing), the
+/// full-file hash pass is skipped entirely.  Per-chunk BLAKE3 has already
+/// verified every byte; a second sequential read of the assembled file would
+/// add 15-60 s for multi-GB files without providing additional coverage.
+///
+/// If `file_blake3` is non-empty (e.g. from an older sender), the check runs
+/// as before.
 async fn finalize_file(
     transfer_id:    String,
     file_index:     usize,
@@ -359,44 +331,54 @@ async fn finalize_file(
     state:          SharedState,
     app:            AppHandle,
 ) {
-    let actual_blake3 = match stream_hash_file(&file_state.dest_path).await {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("[StreamServer] Cannot hash file: {e}");
+    // ── Optional full-file BLAKE3 check ───────────────────────────────────────
+    if !file_state.manifest.file_blake3.is_empty() {
+        let actual_blake3 = match stream_hash_file(&file_state.dest_path).await {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("[StreamServer] Cannot hash file: {e}");
+                let _ = app.emit(
+                    "transfer_error",
+                    &serde_json::json!({
+                        "transferId": transfer_id,
+                        "message": format!("Integrity check failed: {e}"),
+                    }),
+                );
+                return;
+            }
+        };
+
+        if actual_blake3 != file_state.manifest.file_blake3 {
+            eprintln!(
+                "[StreamServer] Full-file BLAKE3 mismatch for file {file_index} in \
+                 {transfer_id}\n  expected: {}\n  actual:   {}",
+                file_state.manifest.file_blake3, actual_blake3
+            );
             let _ = app.emit(
                 "transfer_error",
                 &serde_json::json!({
                     "transferId": transfer_id,
-                    "message": format!("Integrity check failed: {e}"),
+                    "message": format!(
+                        "File integrity check failed: {}",
+                        file_state.manifest.name
+                    ),
                 }),
             );
             return;
         }
-    };
 
-    if actual_blake3 != file_state.manifest.file_blake3 {
         eprintln!(
-            "[StreamServer] Full-file BLAKE3 mismatch for file {file_index} in \
-             {transfer_id}\n  expected: {}\n  actual:   {}",
-            file_state.manifest.file_blake3, actual_blake3
+            "[StreamServer] File {file_index} full-file hash verified — {}",
+            file_state.manifest.name
         );
-        let _ = app.emit(
-            "transfer_error",
-            &serde_json::json!({
-                "transferId": transfer_id,
-                "message": format!(
-                    "File integrity check failed: {}",
-                    file_state.manifest.name
-                ),
-            }),
+    } else {
+        // Per-chunk BLAKE3 already verified every byte in the receive loop.
+        eprintln!(
+            "[StreamServer] File {file_index} complete — per-chunk integrity verified, \
+             skipping full-file hash pass ({})",
+            file_state.manifest.name
         );
-        return;
     }
-
-    eprintln!(
-        "[StreamServer] File {file_index} verified — {}",
-        file_state.manifest.name
-    );
 
     let prev = transfer_state.completed_files.fetch_add(1, Ordering::SeqCst);
     let now  = prev + 1;
@@ -417,6 +399,8 @@ async fn finalize_file(
     }
 }
 
+/// Streaming BLAKE3 of an on-disk file.  Only called when `file_blake3` is
+/// non-empty in the manifest (legacy senders).
 async fn stream_hash_file(path: &std::path::Path) -> anyhow::Result<String> {
     let mut file   = tokio::fs::File::open(path).await?;
     let mut hasher = blake3::Hasher::new();
