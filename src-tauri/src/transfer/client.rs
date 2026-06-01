@@ -293,7 +293,7 @@ pub async fn send_multi_stream(
             .map_err(|je| anyhow::anyhow!("Overseer task panicked: {je}"))
             .and_then(|r| r);
 
-        if let Err(e) = overseer_res   { return Err(e); }
+        if let Err(e) = overseer_res      { return Err(e); }
         if let Some(e) = first_worker_err { return Err(e); }
 
         eprintln!(
@@ -420,11 +420,20 @@ async fn stream_worker_inner(
             .await
             .map_err(|e| anyhow::anyhow!("Worker {worker_id}: read chunk {chunk_id}: {e}"))?;
 
+        // BUGFIX: chunk_info.blake3 is ALWAYS "" — the manifest builder sets it
+        // to String::new() for every chunk and the send loop never computed it.
+        // Sending an empty blake3 produces a 4-token CHUNK header; the receiver's
+        // parts.len() < 5 guard fires "NACK malformed" and loops back WITHOUT
+        // consuming the raw chunk bytes, so the server reads binary file data as
+        // commands — corrupting the connection for every chunk that follows.
+        // Fix: compute the hash from the actual bytes we just read off disk.
+        let chunk_blake3 = hex::encode(blake3::hash(&buf).as_bytes());
+
         writer
             .write_all(
                 format!(
                     "CHUNK {} {} {} {}\n",
-                    chunk_id, chunk_info.offset, chunk_info.size, chunk_info.blake3
+                    chunk_id, chunk_info.offset, chunk_info.size, chunk_blake3
                 )
                 .as_bytes(),
             )
@@ -433,10 +442,10 @@ async fn stream_worker_inner(
 
         line.clear();
         match tokio::time::timeout(ACK_TIMEOUT, reader.read_line(&mut line)).await {
-            Err(_)        => anyhow::bail!("Worker {worker_id}: ACK timeout chunk {chunk_id}"),
-            Ok(Err(e))    => anyhow::bail!("Worker {worker_id}: ACK read error chunk {chunk_id}: {e}"),
-            Ok(Ok(0))     => anyhow::bail!("Worker {worker_id}: connection closed before ACK chunk {chunk_id}"),
-            Ok(Ok(_))     => {}
+            Err(_)     => anyhow::bail!("Worker {worker_id}: ACK timeout chunk {chunk_id}"),
+            Ok(Err(e)) => anyhow::bail!("Worker {worker_id}: ACK read error chunk {chunk_id}: {e}"),
+            Ok(Ok(0))  => anyhow::bail!("Worker {worker_id}: connection closed before ACK chunk {chunk_id}"),
+            Ok(Ok(_))  => {}
         }
 
         let resp = line.trim();
