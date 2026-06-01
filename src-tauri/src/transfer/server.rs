@@ -38,6 +38,7 @@ pub async fn start_transfer_server(
         .route("/resume/:tid",        get(handle_resume))
         .route("/accept/:tid",        post(handle_accept))
         .route("/decline/:tid",       post(handle_decline))
+        .route("/cancel/:tid",        post(handle_cancel))
         .route("/text/:tid",          post(handle_text))
         .with_state(srv);
 
@@ -232,6 +233,35 @@ async fn handle_decline(
         "transfer_error",
         &serde_json::json!({ "transferId": tid, "message": "Transfer declined by recipient" }),
     );
+    StatusCode::OK
+}
+
+/// Called by the sender when it permanently gives up on a transfer (all
+/// reconnect attempts exhausted).  Cleans up receiver-side state and notifies
+/// the receiver's frontend so it doesn't show a transfer stuck in progress.
+async fn handle_cancel(
+    Path(tid): Path<String>,
+    State(srv): State<Srv>,
+) -> StatusCode {
+    let removed = srv
+        .state
+        .lock()
+        .await
+        .active_stream_transfers
+        .remove(&tid)
+        .is_some();
+
+    if removed {
+        eprintln!("[Server] Transfer {tid} cancelled by sender — cleaning up receiver state");
+        let _ = srv.app.emit(
+            "transfer_error",
+            &serde_json::json!({
+                "transferId": tid,
+                "message": "Transfer failed — sender disconnected",
+            }),
+        );
+    }
+
     StatusCode::OK
 }
 

@@ -17,6 +17,15 @@
 //! The overseer runs as a concurrent background task.  It re-queues any chunk
 //! that has been in-flight longer than INFLIGHT_TIMEOUT so a healthy worker
 //! will pick it up without waiting for the transfer to finish.
+//!
+//! Reconnection
+//! ────────────
+//! Workers survive transient TCP failures (WiFi handover, brief disconnects)
+//! by reconnecting to the same stream server with the same transfer_id and
+//! file_index.  The receiver's transfer state is keyed by transfer_id and
+//! persists across connections, so a new TCP connection continues exactly
+//! where the previous one left off.  In-flight chunks are reclaimed to the
+//! shared queue before each reconnect attempt so no chunk is silently lost.
 
 use crate::state::{Device, FileEntry, SharedState, TransferRequest};
 use crate::transfer::manifest::{
@@ -42,6 +51,13 @@ const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// How long to wait for the receiver to accept or decline before giving up.
 const ACCEPT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Maximum number of reconnect attempts per worker.
+/// 12 × 5 s = 60 s reconnect window — enough for a full WiFi handover cycle.
+const MAX_RECONNECT: u8 = 12;
+
+/// Delay between reconnect attempts.
+const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
 // ── Public orchestration ──────────────────────────────────────────────────────
 
@@ -307,8 +323,16 @@ pub async fn send_multi_stream(
 
 // ── Worker ────────────────────────────────────────────────────────────────────
 
-/// Public wrapper. Always calls reclaim_worker before returning so orphaned
-/// in-flight chunks are returned to the queue immediately on any exit path.
+/// Reconnecting wrapper around `stream_worker_inner`.
+///
+/// On any retriable TCP-level failure (connection drop, ACK timeout, WiFi
+/// handover), the worker reclaims its in-flight chunks back to the shared
+/// queue and retries with a fresh TCP connection after RECONNECT_DELAY.
+/// The server-side transfer state is keyed by transfer_id and persists across
+/// connections, so the receiver seamlessly accepts the reconnect.
+///
+/// Non-retriable errors (permanent chunk failure, manifest mismatch, explicit
+/// receiver rejection) propagate immediately without retrying.
 async fn stream_worker(
     transfer_id:   String,
     file_index:    usize,
@@ -321,20 +345,78 @@ async fn stream_worker(
     app:           AppHandle,
     overseer:      FileOverseer,
 ) -> anyhow::Result<()> {
-    let result = stream_worker_inner(
-        &transfer_id, file_index, worker_id,
-        &queue, &file_manifest, &file_path,
-        &target_ip, port, &app, &overseer,
-    )
-    .await;
+    let mut attempt = 0u8;
 
-    overseer.reclaim_worker(worker_id).await;
+    loop {
+        let result = stream_worker_inner(
+            &transfer_id, file_index, worker_id,
+            &queue, &file_manifest, &file_path,
+            &target_ip, port, &app, &overseer,
+        )
+        .await;
 
-    result
+        // Always reclaim in-flight chunks for this worker before deciding
+        // what to do — orphaned chunks go back to the shared queue so other
+        // workers (or this one on reconnect) can process them.
+        overseer.reclaim_worker(worker_id).await;
+
+        match result {
+            Ok(()) => return Ok(()),
+
+            Err(e) => {
+                attempt += 1;
+
+                // Non-retriable: permanent chunk failure, manifest bugs, or
+                // explicit receiver rejection. Do not retry these.
+                if !is_retriable(&e) {
+                    return Err(e);
+                }
+
+                // Check whether any work remains — another worker might have
+                // finished everything while this one was disconnected.
+                let (confirmed, failed) = overseer.completion_counts().await;
+                if confirmed + failed >= overseer.total_chunks {
+                    return Ok(());
+                }
+
+                if attempt >= MAX_RECONNECT {
+                    return Err(anyhow::anyhow!(
+                        "Worker {worker_id}: giving up after {MAX_RECONNECT} reconnect \
+                         attempts (file={file_index} transfer={transfer_id}); \
+                         last error: {e}"
+                    ));
+                }
+
+                eprintln!(
+                    "[StreamClient] Worker {worker_id} disconnected — reconnecting in {}s \
+                     (attempt {attempt}/{MAX_RECONNECT}, {confirmed}/{} confirmed, \
+                     file={file_index} transfer={transfer_id}): {e}",
+                    RECONNECT_DELAY.as_secs(),
+                    overseer.total_chunks,
+                );
+
+                tokio::time::sleep(RECONNECT_DELAY).await;
+                // Loop → stream_worker_inner runs again with a fresh TCP connection.
+            }
+        }
+    }
 }
 
-/// Inner implementation. May use `?` freely — reclaim_worker is handled by
-/// the outer wrapper.
+/// Returns true for errors that are plausibly caused by a dropped TCP
+/// connection and are safe to retry with a fresh connection.
+/// Returns false for permanent failures that would not be resolved by
+/// reconnecting.
+fn is_retriable(e: &anyhow::Error) -> bool {
+    let msg = e.to_string();
+    !msg.contains("permanently failed")   // chunk-level NACK retry exhausted
+        && !msg.contains("not in manifest")   // manifest/logic bug
+        && !msg.contains("ERR unknown transfer") // receiver rejected: transfer gone
+        && !msg.contains("ERR bad file index")   // receiver rejected: bad index
+        && !msg.contains("cannot open")          // local source file missing
+}
+
+/// Inner implementation. May use `?` freely — reclaim_worker and retry logic
+/// are handled by the outer `stream_worker` wrapper.
 async fn stream_worker_inner(
     transfer_id:   &str,
     file_index:    usize,

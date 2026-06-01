@@ -11,6 +11,18 @@
 //! `finalized` flag and spawns `finalize_file`.  All other claim attempts are
 //! no-ops.
 //!
+//! Reconnecting senders
+//! ────────────────────
+//! Workers on the sender survive transient TCP failures by reconnecting with
+//! the same transfer_id and file_index.  The server handles this transparently:
+//!   - Transfer state persists in `active_stream_transfers` across connections.
+//!   - Duplicate chunks (re-sent after reconnect) are detected via the
+//!     `completed_chunks` HashSet and ACK'd without re-writing.
+//!   - `check_all_workers_done` only increments the closed-connection counter;
+//!     it does NOT emit `transfer_error` based on connection count, because
+//!     reconnecting workers create more connections than `streams_expected`.
+//!     Error detection is the sender's responsibility.
+//!
 //! Full-file hash
 //! ──────────────
 //! `FileManifest::file_blake3` is empty when the sender uses lazy chunk
@@ -212,7 +224,7 @@ async fn handle_connection_inner(
             continue;
         }
 
-        // Idempotency: skip write if already received (handles pipeline duplicates)
+        // Idempotency: skip write if already received (handles reconnect duplicates)
         {
             let completed = file_state.completed_chunks.lock().await;
             if completed.contains(&chunk_id) {
@@ -278,37 +290,26 @@ async fn handle_connection_inner(
     Ok(())
 }
 
-/// Increments `streams_done` and, when all workers have terminated without
-/// completing all chunks, emits `transfer_error` (failure path only).
+/// Increments the closed-connection counter and logs it.
+///
+/// Error detection for incomplete transfers is the sender's responsibility.
+/// The sender retries via reconnect and emits `transfer_error` (plus a
+/// `/cancel/:tid` HTTP call to this server) when all retries are exhausted.
+///
+/// We do NOT emit `transfer_error` here based on connection count because
+/// reconnecting workers create more connections than `streams_expected`,
+/// causing the count-based check to fire before the reconnected connections
+/// have finished delivering remaining chunks.
 async fn check_all_workers_done(
     file_state:  &Arc<crate::state::StreamReceiveState>,
-    app:         &AppHandle,
+    _app:        &AppHandle,
     transfer_id: &str,
 ) {
     let done = file_state.streams_done.fetch_add(1, Ordering::SeqCst) + 1;
-    if done >= file_state.streams_expected {
-        let received = file_state.completed_chunks.lock().await.len();
-        if received < file_state.manifest.total_chunks
-            && !file_state.finalized.swap(true, Ordering::SeqCst)
-        {
-            eprintln!(
-                "[StreamServer] All workers done but only {}/{} chunks for {} in {}",
-                received, file_state.manifest.total_chunks,
-                file_state.manifest.name, transfer_id
-            );
-            let _ = app.emit(
-                "transfer_error",
-                &serde_json::json!({
-                    "transferId": transfer_id,
-                    "message": format!(
-                        "Transfer incomplete: received {}/{} chunks for {}",
-                        received, file_state.manifest.total_chunks,
-                        file_state.manifest.name
-                    ),
-                }),
-            );
-        }
-    }
+    eprintln!(
+        "[StreamServer] Connection closed ({done} total, {} declared, transfer={transfer_id})",
+        file_state.streams_expected
+    );
 }
 
 /// Called exactly once per file (atomic `finalized` flag) after the last chunk

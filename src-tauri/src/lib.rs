@@ -132,11 +132,7 @@ async fn send_files(
 
     let transfer_id = uuid::Uuid::new_v4().to_string();
 
-    // ── CHANGE 1: emit transfer_started so the sender sees their own transfer ──
-    // Build the JSON payload before `files` and `target` are moved into the
-    // async closure.  direction = "outgoing" → frontend renders TX badge and
-    // routes progress updates via the chunk_sent / transfer_overseer_verified
-    // path rather than the receiver path.
+    // ── Emit transfer_started so the sender sees their own transfer ────────────
     {
         let total_bytes: u64 = files.iter().map(|f| f.size_bytes).sum();
         let files_json: Vec<serde_json::Value> = files
@@ -171,6 +167,11 @@ async fn send_files(
         );
     }
 
+    // Capture target address before `target` is moved into send_files_to_device.
+    // Needed to send the cancel signal to the receiver on permanent failure.
+    let target_ip   = target.ip.clone();
+    let target_port = target.port;
+
     let state_clone = state.inner().clone();
     let app_clone = app.clone();
     let tid = transfer_id.clone();
@@ -199,18 +200,26 @@ async fn send_files(
                 let msg = e.to_string();
                 eprintln!("[Send] Transfer error: {e}");
 
-                // ── CHANGE 2: emit transfer_declined so the TX card updates ──
-                // Previously this branch was silently swallowed on the sender
-                // side (with a comment saying the receiver's server.rs already
-                // emitted transfer_error — but that emission targets the
-                // receiver's own app, not ours).  The sender's transfer card
-                // was left in "queued" forever.
                 if msg.contains("declined by receiver") {
+                    // Receiver already cleaned its own state via handle_decline.
                     let _ = app_clone.emit(
                         "transfer_declined",
                         &serde_json::json!({ "transferId": tid }),
                     );
                 } else {
+                    // Permanent failure — notify the receiver so it can clean up
+                    // active_stream_transfers and show an error to its user.
+                    // Fire-and-forget: if the receiver is offline this is a no-op.
+                    let cancel_url = format!(
+                        "http://{}:{}/cancel/{}",
+                        target_ip, target_port, tid
+                    );
+                    let _ = reqwest::Client::new()
+                        .post(&cancel_url)
+                        .timeout(std::time::Duration::from_secs(5))
+                        .send()
+                        .await;
+
                     let _ = app_clone.emit(
                         "transfer_error",
                         &serde_json::json!({ "transferId": tid, "message": msg }),

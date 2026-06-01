@@ -1,6 +1,7 @@
 package com.abyssprotocol.therift
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
@@ -67,8 +68,6 @@ object RiftAndroidHelper {
             nativeInitJvm()
             Log.i(TAG, "JVM initialised for native file operations")
         } catch (e: UnsatisfiedLinkError) {
-            // Native library not yet loaded — log and continue. File operations
-            // will return a descriptive error from Rust rather than aborting.
             Log.e(TAG, "nativeInitJvm: native library not loaded — ${e.message}")
         }
         Log.i(TAG, "RiftAndroidHelper initialised")
@@ -80,6 +79,19 @@ object RiftAndroidHelper {
      * Queries display name and size for a content:// URI via ContentResolver.
      * Returns "displayName|sizeBytes". Returns "|0" on any failure.
      *
+     * Also persists the URI read grant via takePersistableUriPermission so that
+     * copyUriToCache() can still open the URI after the originating file-picker
+     * Intent has been destroyed.
+     *
+     * Background: ACTION_OPEN_DOCUMENT results carry FLAG_GRANT_READ_URI_PERMISSION
+     * but the grant is session-scoped by default. Without persisting it, a call to
+     * openInputStream() on the same URI seconds later (when the user taps Send)
+     * raises SecurityException. takePersistableUriPermission() upgrades the grant
+     * to persist across Intent destruction. This only works for URIs whose document
+     * provider advertised FLAG_GRANT_PERSISTABLE_URI_PERMISSION; for those that
+     * don't (e.g. some cloud providers, OEM gallery URIs), we silently continue —
+     * copyUriToCache() will log its own error if access fails.
+     *
      * Called from android_fs::call_kotlin_string_method (blocking thread).
      */
     @JvmStatic
@@ -90,6 +102,20 @@ object RiftAndroidHelper {
         }
         return try {
             val uri = Uri.parse(uriString)
+
+            // Persist the URI read grant so copyUriToCache() can open it later.
+            // SecurityException is expected for URIs that don't support persistable
+            // grants — log at WARN and continue; copyUriToCache() handles access
+            // failures explicitly.
+            try {
+                ctx.contentResolver.takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+                Log.d(TAG, "URI grant persisted: $uriString")
+            } catch (e: SecurityException) {
+                Log.w(TAG, "URI grant not persistable ($uriString): ${e.message}")
+            }
+
             var name = ""
             var size = 0L
 
@@ -104,7 +130,6 @@ object RiftAndroidHelper {
                 }
             }
 
-            // Fallback: use the last path segment of the URI as the name.
             if (name.isEmpty()) {
                 name = uri.lastPathSegment ?: "file"
             }
@@ -136,7 +161,6 @@ object RiftAndroidHelper {
         return try {
             val uri = Uri.parse(uriString)
 
-            // Derive a safe display name for the cache file.
             var displayName = "rift_${System.currentTimeMillis()}"
             ctx.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
                 val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
@@ -147,7 +171,6 @@ object RiftAndroidHelper {
                 }
             }
 
-            // Remove path separators so File() does not create subdirectories.
             val safeName = displayName
                 .replace('/', '_')
                 .replace('\\', '_')
