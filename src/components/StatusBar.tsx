@@ -60,8 +60,9 @@ export function StatusBar() {
         style={{ background: "rgb(var(--rift-muted) / 0.15)" }}
       />
 
-      {/* Hotspot button */}
+      {/* Hotspot button — data-tour="hotspot-btn" makes it the target for tour step 2 */}
       <button
+        data-tour="hotspot-btn"
         onClick={() => setHotspotOpen(!hotspotPanelOpen)}
         className="text-[10px] font-mono tracking-[0.14em] px-2.5 py-1 rounded-full transition-all duration-150"
         style={{

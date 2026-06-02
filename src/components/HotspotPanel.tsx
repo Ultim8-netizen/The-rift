@@ -10,13 +10,13 @@ function translateError(raw: string): string {
     return "No internet connection found. Connect to the internet first, then try again. Or enable Mobile Hotspot manually in Windows Settings and tap Detect below.";
   }
   if (r.includes("adapter") || r.includes("hostednetwork") || r.includes("mode=allow") || r.includes("not support")) {
-    return "Your WiFi adapter does not support this mode. Enable Mobile Hotspot manually in Windows Settings (Network & Internet → Mobile hotspot), then tap Detect below.";
+    return "Your WiFi adapter does not support this mode. Enable Mobile Hotspot manually in Windows Settings (Network & Internet then Mobile hotspot), then tap Detect below.";
   }
   if (r.includes("administrator") || r.includes("privilege") || r.includes("admin")) {
     return "The Rift needs administrator privileges to create a hotspot. Please restart the app as Administrator.";
   }
   if (r.includes("tetheringstat") || r.includes("status=")) {
-    return "Windows could not start the hotspot. Try enabling it manually in Settings → Network & Internet → Mobile hotspot, then tap Detect below.";
+    return "Windows could not start the hotspot. Try enabling it manually in Settings then Network & Internet then Mobile hotspot, then tap Detect below.";
   }
   if (r.includes("could not start") || r.includes("automatically")) {
     return raw;
@@ -130,16 +130,14 @@ export function HotspotPanel() {
     try {
       await detectHotspot();
     } catch {
-      // detectHotspot failure always maps to this fixed message; binding unused
       setError("No active hotspot found. Make sure Mobile Hotspot is turned on in Windows Settings, then try again.");
     } finally {
       setLoading(false);
     }
   }
 
-  const isHosting = hotspotRole === "host"  && hotspotInfo !== null;
-  const isGuest   = hotspotRole === "guest" && hotspotInfo !== null;
-
+  const isHosting  = hotspotRole === "host"  && hotspotInfo !== null;
+  const isGuest    = hotspotRole === "guest" && hotspotInfo !== null;
   const wasDetected = isHosting && hotspotInfo?.password === "";
 
   return (
@@ -149,8 +147,12 @@ export function HotspotPanel() {
       className="fixed inset-0 z-50 flex items-center justify-center animate-fade-in"
       style={{ background: "rgb(0 0 0 / 0.55)", backdropFilter: "blur(14px)" }}
     >
+      {/* data-tour="hotspot-panel-body" — targeted by tour steps 3 and 4.
+          The tour overlay (z-200) sits above this panel (z-50) and highlights
+          the card through the scrim cutout. */}
       <div
-        className="glass-heavy rounded-3xl w-80 shadow-glass overflow-hidden animate-slide-up"
+        data-tour="hotspot-panel-body"
+        className="glass-heavy rounded-3xl shadow-glass overflow-hidden animate-slide-up"
         style={{ width: "20rem" }}
       >
         {/* Accent bar */}
