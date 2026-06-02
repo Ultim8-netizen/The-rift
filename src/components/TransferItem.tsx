@@ -20,33 +20,57 @@ const STATUS_CONFIG: Record<string, {
   bg: string;
   glow?: string;
 }> = {
-  queued:       { label: "QUEUE",  color: "rgb(var(--rift-muted))",        bg: "rgb(var(--rift-muted) / 0.08)" },
-  connecting:   { label: "CONN",   color: "rgb(var(--rift-warning))",      bg: "rgb(var(--rift-warning) / 0.1)",  glow: "0 0 12px rgb(var(--rift-warning) / 0.2)" },
-  transferring: { label: "LIVE",   color: "rgb(var(--rift-accent))",       bg: "rgb(var(--rift-accent) / 0.1)",   glow: "0 0 12px rgb(var(--rift-glow) / 0.25)" },
-  paused:       { label: "PAUSE",  color: "rgb(var(--rift-warning))",      bg: "rgb(var(--rift-warning) / 0.08)" },
-  complete:     { label: "DONE",   color: "rgb(var(--rift-success))",      bg: "rgb(var(--rift-success) / 0.1)",  glow: "0 0 10px rgb(var(--rift-success) / 0.2)" },
-  error:        { label: "ERR",    color: "rgb(var(--rift-error))",        bg: "rgb(var(--rift-error) / 0.1)" },
-  declined:     { label: "DENY",   color: "rgb(var(--rift-error) / 0.7)", bg: "rgb(var(--rift-error) / 0.07)" },
+  queued:       { label: "QUEUE", color: "rgb(var(--rift-muted))",         bg: "rgb(var(--rift-muted) / 0.08)" },
+  connecting:   { label: "CONN",  color: "rgb(var(--rift-warning))",       bg: "rgb(var(--rift-warning) / 0.1)",  glow: "0 0 12px rgb(var(--rift-warning) / 0.2)" },
+  transferring: { label: "LIVE",  color: "rgb(var(--rift-accent))",        bg: "rgb(var(--rift-accent) / 0.1)",   glow: "0 0 12px rgb(var(--rift-glow) / 0.25)" },
+  paused:       { label: "PAUSE", color: "rgb(var(--rift-warning))",       bg: "rgb(var(--rift-warning) / 0.08)" },
+  complete:     { label: "DONE",  color: "rgb(var(--rift-success))",       bg: "rgb(var(--rift-success) / 0.1)",  glow: "0 0 10px rgb(var(--rift-success) / 0.2)" },
+  error:        { label: "ERR",   color: "rgb(var(--rift-error))",         bg: "rgb(var(--rift-error) / 0.1)" },
+  declined:     { label: "DENY",  color: "rgb(var(--rift-error) / 0.7)",  bg: "rgb(var(--rift-error) / 0.07)" },
 };
 
+// ── Detail row for single-file expanded view ───────────────────────────────────
+function DetailRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div
+      className="flex items-start gap-2 px-2.5 py-1.5"
+      style={{ borderBottom: "1px solid rgb(255 255 255 / 0.04)" }}
+    >
+      <span
+        className="text-[9px] font-mono uppercase tracking-[0.1em] flex-shrink-0 w-12 mt-0.5"
+        style={{ color: "rgb(var(--rift-muted) / 0.48)" }}
+      >
+        {label}
+      </span>
+      <span
+        className="text-[10px] font-mono break-all leading-relaxed"
+        style={{ color: "rgb(var(--rift-muted) / 0.8)" }}
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
 export function TransferItem({ transfer }: { transfer: Transfer }) {
-  const [tilt,          setTilt]          = useState({ x: 0, y: 0 });
-  const [light,         setLight]         = useState({ x: 50, y: 50 });
-  const [hovered,       setHovered]       = useState(false);
-  // Default expanded so all files are visible immediately on multi-file transfers.
-  const [filesExpanded, setFilesExpanded] = useState(true);
+  const isMulti = transfer.files.length > 1;
+
+  const [tilt,        setTilt]        = useState({ x: 0, y: 0 });
+  const [light,       setLight]       = useState({ x: 50, y: 50 });
+  const [hovered,     setHovered]     = useState(false);
+  // Multi-file starts expanded so the file list is immediately visible.
+  // Single-file starts collapsed — the name is already in the header.
+  const [detailsOpen, setDetailsOpen] = useState(isMulti);
 
   const progress =
     transfer.totalBytes > 0 && typeof transfer.bytesTransferred === "number"
       ? Math.min(100, (transfer.bytesTransferred / transfer.totalBytes) * 100)
       : 0;
 
-  // For the top-level label, always just show the peer + total.
-  // The per-file list below carries the detail.
   const label =
-    transfer.files.length === 1
-      ? (transfer.files[0]?.name ?? "Unknown")
-      : `${transfer.files.length} files`;
+    isMulti
+      ? `${transfer.files.length} files`
+      : (transfer.files[0]?.name ?? "Unknown");
 
   const peer =
     transfer.direction === "outgoing"
@@ -56,7 +80,8 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
   const sc       = STATUS_CONFIG[transfer.status] ?? STATUS_CONFIG.queued;
   const isActive = transfer.status === "transferring" || transfer.status === "paused";
   const isDone   = transfer.status === "complete";
-  const isMulti  = transfer.files.length > 1;
+
+  const firstFile = transfer.files[0];
 
   function handleMouseMove(e: MouseEvent<HTMLDivElement>) {
     const r = e.currentTarget.getBoundingClientRect();
@@ -77,10 +102,10 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
         setHovered(false);
       }}
       style={{
-        position:        "relative",
-        overflow:        "hidden",
-        background:      `rgb(var(--rift-surface2) / ${isDone ? "0.32" : "0.5"})`,
-        backdropFilter:  "blur(20px)",
+        position:       "relative",
+        overflow:       "hidden",
+        background:     `rgb(var(--rift-surface2) / ${isDone ? "0.32" : "0.5"})`,
+        backdropFilter: "blur(20px)",
         boxShadow: `
           0 2px 10px rgb(0 0 0 / ${isDone ? "0.18" : "0.25"}),
           0 0 0 1px rgb(255 255 255 / 0.04),
@@ -93,16 +118,16 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
           : "transform 0.65s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease",
       }}
     >
-      {/* ── Surface light ── */}
+      {/* Surface light overlay */}
       <div
         aria-hidden
         style={{
-          position:     "absolute",
-          inset:        0,
-          borderRadius: "16px",
-          pointerEvents:"none",
-          zIndex:       0,
-          background:   `radial-gradient(circle at ${light.x}% ${light.y}%,
+          position:      "absolute",
+          inset:         0,
+          borderRadius:  "16px",
+          pointerEvents: "none",
+          zIndex:        0,
+          background: `radial-gradient(circle at ${light.x}% ${light.y}%,
             rgb(255 255 255 / 0.09) 0%,
             rgb(255 255 255 / 0.03) 40%,
             transparent 65%)`,
@@ -111,10 +136,9 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
         }}
       />
 
-      {/* ── Content ── */}
       <div style={{ position: "relative", zIndex: 1 }}>
 
-        {/* ── Header row ── */}
+        {/* ── Header row ───────────────────────────────────────────────── */}
         <div className="flex items-start gap-2 mb-1.5">
 
           {/* Direction badge */}
@@ -164,50 +188,55 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
           </span>
         </div>
 
-        {/* ── Per-file list (multi-file transfers) ── */}
-        {isMulti && (
-          <div className="mb-2">
-            {/* Toggle button */}
-            <button
-              onClick={() => setFilesExpanded((v) => !v)}
-              className="flex items-center gap-1.5 mb-1 transition-opacity"
-              style={{ color: "rgb(var(--rift-muted) / 0.55)" }}
-            >
-              <span
-                className="text-[9px] font-mono leading-none"
-                style={{
-                  display:        "inline-block",
-                  transform:      filesExpanded ? "rotate(90deg)" : "rotate(0deg)",
-                  transition:     "transform 0.18s ease",
-                  transformOrigin:"center",
-                }}
-              >
-                ▶
-              </span>
-              <span className="text-[9px] font-mono uppercase tracking-[0.14em]">
-                {transfer.files.length} files
-              </span>
-            </button>
+        {/* ── Expandable details (all transfers) ───────────────────────── */}
+        <div className="mb-1">
 
-            {/* Scrollable file rows */}
-            {filesExpanded && (
-              <div
-                className="rounded-xl overflow-hidden"
-                style={{
-                  maxHeight:    "9rem",
-                  overflowY:    "auto",
-                  background:   "rgb(var(--rift-bg) / 0.38)",
-                  boxShadow:    "inset 0 1px 4px rgb(0 0 0 / 0.22)",
-                }}
-              >
-                {transfer.files.map((f, i) => (
+          {/* Toggle button — always present */}
+          <button
+            onClick={() => setDetailsOpen((v) => !v)}
+            className="flex items-center gap-1.5 mb-1 transition-opacity hover:opacity-80"
+            style={{ color: "rgb(var(--rift-muted) / 0.55)" }}
+          >
+            <span
+              className="text-[9px] font-mono leading-none"
+              style={{
+                display:         "inline-block",
+                transform:       detailsOpen ? "rotate(90deg)" : "rotate(0deg)",
+                transition:      "transform 0.18s ease",
+                transformOrigin: "center",
+              }}
+            >
+              ▶
+            </span>
+            <span className="text-[9px] font-mono uppercase tracking-[0.14em]">
+              {isMulti ? `${transfer.files.length} files` : "Details"}
+            </span>
+          </button>
+
+          {detailsOpen && (
+            <div
+              // Use explicit overflow classes to avoid the cascade ambiguity
+              // of combining the `overflow-hidden` Tailwind class with an
+              // inline overflowY — the class sets overflow: hidden on both
+              // axes and the inline style may not reliably win in all engines.
+              className="rounded-xl overflow-y-auto overflow-x-hidden"
+              style={{
+                maxHeight: "9rem",
+                background: "rgb(var(--rift-bg) / 0.38)",
+                boxShadow: "inset 0 1px 4px rgb(0 0 0 / 0.22)",
+              }}
+            >
+              {isMulti ? (
+                /* Multi-file: scrollable file list */
+                transfer.files.map((f, i) => (
                   <div
                     key={i}
                     className="flex items-center justify-between px-2.5 py-1.5"
                     style={{
-                      borderBottom: i < transfer.files.length - 1
-                        ? "1px solid rgb(255 255 255 / 0.04)"
-                        : "none",
+                      borderBottom:
+                        i < transfer.files.length - 1
+                          ? "1px solid rgb(255 255 255 / 0.04)"
+                          : "none",
                     }}
                   >
                     <span
@@ -223,15 +252,31 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
                       {fmt(f.sizeBytes)}
                     </span>
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+                ))
+              ) : (
+                /* Single-file: key/value detail rows */
+                <>
+                  <DetailRow label="Name" value={firstFile?.name ?? "—"} />
+                  <DetailRow label="Size" value={
+                    firstFile
+                      ? `${fmt(firstFile.sizeBytes)}  (${firstFile.sizeBytes.toLocaleString()} B)`
+                      : "—"
+                  } />
+                  {transfer.direction === "outgoing" && firstFile?.path && (
+                    <DetailRow label="Source" value={firstFile.path} />
+                  )}
+                  {transfer.status === "complete" && transfer.savePath && (
+                    <DetailRow label="Saved" value={transfer.savePath} />
+                  )}
+                </>
+              )}
+            </div>
+          )}
+        </div>
 
-        {/* ── Progress bar — only during active transfer ── */}
+        {/* ── Progress bar — active transfers only ─────────────────────── */}
         {isActive && (
-          <div className="mt-1.5">
+          <div className="mt-0.5">
             <div className="progress-bar-track w-full h-1">
               <div
                 className="progress-bar-fill"
@@ -258,7 +303,7 @@ export function TransferItem({ transfer }: { transfer: Transfer }) {
           </div>
         )}
 
-        {/* ── Error message ── */}
+        {/* ── Error message ─────────────────────────────────────────────── */}
         {transfer.status === "error" && transfer.errorMessage && (
           <p
             className="text-[10px] font-mono mt-1.5 leading-snug"

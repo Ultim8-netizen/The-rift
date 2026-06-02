@@ -3,61 +3,65 @@ import { useTauriEvent, useInvoke } from "./useTauri";
 import { useRiftStore } from "@/store/riftStore";
 import { ChunkProgress, IncomingRequest, IncomingTextPayload, Transfer } from "@/types";
 
-// ── Progress tracker ──────────────────────────────────────────────────────────
-const CHUNK_SIZE = 512 * 1024; // mirrors DEFAULT_CHUNK_SIZE in manifest.rs
+// ── Progress constants ────────────────────────────────────────────────────────
+// CRITICAL: must match DEFAULT_CHUNK_SIZE in src-tauri/src/transfer/manifest.rs.
+// The previous value (512 * 1024) was 4× too small: the frontend estimated
+// 4× more chunks than the backend actually sent, so the progress bar topped
+// out at ~25 % before the transfer completed.
+const CHUNK_SIZE = 2 * 1024 * 1024; // 2 MiB
 const EMA_ALPHA = 0.3;
-const MIN_SPEED_FOR_ETA = 2048; // 2 KB/s
+const MIN_SPEED_FOR_ETA = 2048; // 2 KB/s — suppress ETA at very low speeds
 
+// ── Tracker ───────────────────────────────────────────────────────────────────
 interface ProgressTracker {
-  chunksReceived: number;
+  chunksReceived:      number;
   totalExpectedChunks: number;
-  lastTime: number;
-  lastBytes: number;
-  speedEma: number;
-  // Outgoing-specific: tracks which file indices the overseer has verified.
-  // When verifiedFiles.size === transfer.files.length the transfer is complete.
-  verifiedFiles: Set<number>;
+  lastTime:            number;
+  lastBytes:           number;
+  speedEma:            number;
+  /** File indices confirmed by transfer_overseer_verified (sender side). */
+  verifiedFiles:       Set<number>;
 }
 
-// Shared helper: build or retrieve a tracker for a transfer.
-// `direction` is only used to initialise — the tracker itself is direction-agnostic.
-function getOrCreateTracker(
-  trackers: Map<string, ProgressTracker>,
-  transferId: string,
-  totalFiles: { sizeBytes: number }[],
-  now: number
-): ProgressTracker {
-  let tracker = trackers.get(transferId);
-  if (!tracker) {
-    const totalExpectedChunks = totalFiles.reduce(
-      (sum, f) => sum + Math.max(1, Math.ceil(f.sizeBytes / CHUNK_SIZE)),
-      0
-    );
-    tracker = {
-      chunksReceived: 0,
-      totalExpectedChunks,
-      lastTime: now,
-      lastBytes: 0,
-      speedEma: 0,
-      verifiedFiles: new Set(),
-    };
-    trackers.set(transferId, tracker);
-  }
-  return tracker;
+function makeTracker(totalExpectedChunks: number, now: number): ProgressTracker {
+  return {
+    chunksReceived:      0,
+    totalExpectedChunks,
+    lastTime:            now,
+    lastBytes:           0,
+    speedEma:            0,
+    verifiedFiles:       new Set(),
+  };
 }
 
-// Shared helper: advance the tracker by one chunk and compute UI values.
+/** Sum of ceil(sizeBytes / CHUNK_SIZE) across all files — total expected chunks. */
+function computeExpectedChunks(files: { sizeBytes: number }[]): number {
+  return files.reduce(
+    (sum, f) => sum + Math.max(1, Math.ceil(f.sizeBytes / CHUNK_SIZE)),
+    0,
+  );
+}
+
+/**
+ * Increment chunk counter, compute bytes-transferred proportion, update EMA speed.
+ * Returns values ready to pass directly to updateTransfer().
+ */
 function advanceTracker(
-  tracker: ProgressTracker,
+  tracker:       ProgressTracker,
   transferTotal: number,
-  now: number
+  now:           number,
 ): { bytesTransferred: number; speedBytesPerSec: number; etaSeconds: number | null } {
   tracker.chunksReceived++;
 
-  const bytesTransferred = Math.min(
-    Math.round((tracker.chunksReceived / tracker.totalExpectedChunks) * transferTotal),
-    transferTotal
-  );
+  const bytesTransferred =
+    tracker.totalExpectedChunks > 0
+      ? Math.min(
+          Math.round(
+            (tracker.chunksReceived / tracker.totalExpectedChunks) * transferTotal,
+          ),
+          transferTotal,
+        )
+      : 0;
 
   const dtSeconds  = Math.max(0.02, (now - tracker.lastTime) / 1000);
   const deltaBytes = bytesTransferred - tracker.lastBytes;
@@ -84,7 +88,7 @@ function advanceTracker(
   };
 }
 
-// ── Event listeners — call ONCE in App.tsx only ───────────────────────────────
+// ── Event listeners ───────────────────────────────────────────────────────────
 export function useTransferEvents() {
   const addTransfer        = useRiftStore((s) => s.addTransfer);
   const updateTransfer     = useRiftStore((s) => s.updateTransfer);
@@ -93,43 +97,41 @@ export function useTransferEvents() {
 
   const trackers = useRef<Map<string, ProgressTracker>>(new Map());
 
-  // ── transfer_started ───────────────────────────────────────────────────────
-  // Fired by the SENDER's Rust side (lib.rs send_files) for outgoing transfers.
-  // Previously this listener existed but Rust never emitted the event.
+  // ── transfer_started ──────────────────────────────────────────────────────
+  // Fired by the sender's Rust side (lib.rs send_files) for outgoing transfers.
   useTauriEvent<Transfer>("transfer_started", (transfer) => {
     addTransfer(transfer);
   });
 
-  // ── transfer_progress (INCOMING on receiver) ───────────────────────────────
+  // ── transfer_progress (INCOMING — receiver side) ──────────────────────────
+  // Fires once per chunk written to disk. totalChunks/totalBytes are per-file
+  // (from the manifest). We accumulate across all files via the chunk counter.
   useTauriEvent<ChunkProgress>("transfer_progress", (progress) => {
     const { transferId, totalChunks, totalBytes } = progress;
-    const now = Date.now();
-
+    const now    = Date.now();
     const stored = useRiftStore.getState().transfers.find((t) => t.id === transferId);
-    const expectedChunks = stored
-      ? stored.files.reduce(
-          (sum, f) => sum + Math.max(1, Math.ceil(f.sizeBytes / CHUNK_SIZE)),
-          0
-        )
-      : totalChunks;
+    const transferTotal = stored?.totalBytes ?? totalBytes;
 
-    const tracker = getOrCreateTracker(
-      trackers.current,
-      transferId,
-      stored?.files ?? Array(Math.max(1, Math.ceil(totalBytes / CHUNK_SIZE))).fill({ sizeBytes: CHUNK_SIZE }),
-      now
-    );
+    // For single-file transfers use the exact manifest chunk count from the
+    // event (avoids any CHUNK_SIZE rounding error for the last chunk).
+    // For multi-file transfers, sum across all stored file sizes.
+    const expectedTotal =
+      stored?.files && stored.files.length > 0
+        ? stored.files.length === 1
+          ? totalChunks
+          : computeExpectedChunks(stored.files)
+        : totalChunks;
 
-    // Ensure totalExpectedChunks is set correctly if it wasn't initialised from the store.
-    if (tracker.totalExpectedChunks === 0) {
-      tracker.totalExpectedChunks = expectedChunks;
+    let tracker = trackers.current.get(transferId);
+    if (!tracker) {
+      tracker = makeTracker(expectedTotal, now);
+      trackers.current.set(transferId, tracker);
     }
 
-    const transferTotal = stored?.totalBytes ?? totalBytes;
     const { bytesTransferred, speedBytesPerSec, etaSeconds } = advanceTracker(
       tracker,
       transferTotal,
-      now
+      now,
     );
 
     updateTransfer(transferId, {
@@ -140,30 +142,30 @@ export function useTransferEvents() {
     });
   });
 
-  // ── chunk_sent (OUTGOING on sender) ───────────────────────────────────────
-  // Emitted by client.rs for every ACK'd chunk.  Used to drive the TX card's
-  // progress bar and speed readout on the sender's side.
+  // ── chunk_sent (OUTGOING — sender side) ───────────────────────────────────
+  // Emitted by client.rs every EMIT_EVERY_N_CHUNKS (8) confirmed chunks.
+  // For files smaller than 16 MiB (< 8 chunks) this never fires; those
+  // transfers go queued → complete via transfer_overseer_verified directly.
   useTauriEvent<{
     transferId: string;
-    fileIndex: number;
-    chunkId: number;
-    workerId: number;
+    fileIndex:  number;
+    chunkId:    number;
+    workerId:   number;
   }>("chunk_sent", ({ transferId }) => {
-    const now = Date.now();
+    const now    = Date.now();
     const stored = useRiftStore.getState().transfers.find((t) => t.id === transferId);
     if (!stored) return;
 
-    const tracker = getOrCreateTracker(
-      trackers.current,
-      transferId,
-      stored.files,
-      now
-    );
+    let tracker = trackers.current.get(transferId);
+    if (!tracker) {
+      tracker = makeTracker(computeExpectedChunks(stored.files), now);
+      trackers.current.set(transferId, tracker);
+    }
 
     const { bytesTransferred, speedBytesPerSec, etaSeconds } = advanceTracker(
       tracker,
       stored.totalBytes,
-      now
+      now,
     );
 
     updateTransfer(transferId, {
@@ -174,7 +176,28 @@ export function useTransferEvents() {
     });
   });
 
-  // ── transfer_complete (INCOMING on receiver) ───────────────────────────────
+  // ── transfer_overseer_tick (OUTGOING — sender side) ───────────────────────
+  // Fires every 500 ms from the overseer background task. We use it only to
+  // transition a queued outgoing transfer to "transferring" so the UI card
+  // doesn't stay on QUEUE for the full duration of small/fast files.
+  useTauriEvent<{ transferId: string }>(
+    "transfer_overseer_tick",
+    ({ transferId }) => {
+      const stored = useRiftStore
+        .getState()
+        .transfers.find(
+          (t) =>
+            t.id === transferId &&
+            t.direction === "outgoing" &&
+            t.status === "queued",
+        );
+      if (stored) {
+        updateTransfer(transferId, { status: "transferring" });
+      }
+    },
+  );
+
+  // ── transfer_complete (INCOMING — receiver side) ──────────────────────────
   useTauriEvent<{ transferId: string; savePath: string }>(
     "transfer_complete",
     ({ transferId, savePath }) => {
@@ -188,22 +211,24 @@ export function useTransferEvents() {
         speedBytesPerSec: 0,
         etaSeconds:       null,
       });
-    }
+    },
   );
 
-  // ── transfer_overseer_verified (OUTGOING on sender) ───────────────────────
-  // The overseer fires once per FILE after all chunks for that file are
-  // confirmed.  We accumulate verified file indices and mark the whole transfer
+  // ── transfer_overseer_verified (OUTGOING — sender side) ──────────────────
+  // Fires once per FILE after all chunks for that file are confirmed by the
+  // overseer. We accumulate verified file indices and mark the whole transfer
   // complete only when every file has been verified.
+  // Between verifications, we update bytesTransferred to reflect completed files.
   useTauriEvent<{
-    transferId: string;
-    fileIndex: number;
+    transferId:  string;
+    fileIndex:   number;
     totalChunks: number;
   }>("transfer_overseer_verified", ({ transferId, fileIndex }) => {
-    // Only relevant for outgoing transfers on the sender side.
     const stored = useRiftStore
       .getState()
-      .transfers.find((t) => t.id === transferId && t.direction === "outgoing");
+      .transfers.find(
+        (t) => t.id === transferId && t.direction === "outgoing",
+      );
     if (!stored) return;
 
     const tracker = trackers.current.get(transferId);
@@ -212,7 +237,7 @@ export function useTransferEvents() {
     tracker.verifiedFiles.add(fileIndex);
 
     if (tracker.verifiedFiles.size >= stored.files.length) {
-      // All files confirmed by the overseer — the transfer is fully done.
+      // All files confirmed — transfer done.
       trackers.current.delete(transferId);
       updateTransfer(transferId, {
         status:           "complete",
@@ -221,23 +246,26 @@ export function useTransferEvents() {
         speedBytesPerSec: 0,
         etaSeconds:       null,
       });
+    } else {
+      // Partial completion — reflect verified file bytes so the bar advances
+      // between file boundaries even if chunk_sent events are sparse.
+      const verifiedBytes = stored.files
+        .filter((_, i) => tracker.verifiedFiles.has(i))
+        .reduce((sum, f) => sum + f.sizeBytes, 0);
+      updateTransfer(transferId, { bytesTransferred: verifiedBytes });
     }
   });
 
-  // ── transfer_error (both sender and receiver) ─────────────────────────────
+  // ── transfer_error (both sides) ───────────────────────────────────────────
   useTauriEvent<{ transferId: string; message: string }>(
     "transfer_error",
     ({ transferId, message }) => {
       trackers.current.delete(transferId);
       updateTransfer(transferId, { status: "error", errorMessage: message });
-    }
+    },
   );
 
-  // ── transfer_declined (OUTGOING on sender) ────────────────────────────────
-  // Emitted by lib.rs when the receiver declines.  Previously this case was
-  // swallowed with a misleading comment — the receiver's server.rs DID emit
-  // transfer_error, but to its OWN app, not to ours.  The sender's transfer
-  // card was permanently stuck in "queued" / QUEUE status.
+  // ── transfer_declined (OUTGOING — sender side) ────────────────────────────
   useTauriEvent<{ transferId: string }>("transfer_declined", ({ transferId }) => {
     trackers.current.delete(transferId);
     updateTransfer(transferId, { status: "declined" });
@@ -270,7 +298,7 @@ export function useTransferEvents() {
   });
 }
 
-// ── Action functions — safe to call from any component ────────────────────────
+// ── Action functions ──────────────────────────────────────────────────────────
 export function useTransferActions() {
   const { call }           = useInvoke();
   const clearStagedFiles   = useRiftStore((s) => s.clearStagedFiles);

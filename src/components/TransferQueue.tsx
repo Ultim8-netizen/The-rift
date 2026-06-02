@@ -41,9 +41,9 @@ export function TransferQueue() {
           <span
             className="text-[9px] font-mono font-bold px-2.5 py-1 rounded-full"
             style={{
-              color: "rgb(var(--rift-success))",
+              color:      "rgb(var(--rift-success))",
               background: "rgb(var(--rift-success) / 0.1)",
-              boxShadow: "0 0 0 1px rgb(var(--rift-success) / 0.2)",
+              boxShadow:  "0 0 0 1px rgb(var(--rift-success) / 0.2)",
             }}
           >
             {doneCount} done
@@ -54,13 +54,19 @@ export function TransferQueue() {
       <div
         className="mx-3 flex-shrink-0"
         style={{
-          height: "1px",
-          background:
-            "linear-gradient(90deg, transparent, rgb(var(--rift-accent) / 0.1), transparent)",
+          height:     "1px",
+          background: "linear-gradient(90deg, transparent, rgb(var(--rift-accent) / 0.1), transparent)",
         }}
       />
 
-      <div className="flex-1 overflow-y-auto p-2.5 flex flex-col gap-2">
+      {/*
+        min-h-0 is required here. In a flex column, flex items default to
+        min-height: auto, which lets them grow to their content height and
+        prevents overflow-y: auto from ever creating a scroll region.
+        Setting min-h-0 overrides this so the div is constrained to the
+        flex-allocated height and actually scrolls.
+      */}
+      <div className="flex-1 overflow-y-auto p-2.5 flex flex-col gap-2 min-h-0">
         {transfers.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full gap-3 py-8">
             <div
