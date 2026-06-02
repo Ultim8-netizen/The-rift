@@ -5,10 +5,10 @@
 import { useEffect, useRef } from "react";
 
 // ─── constants ────────────────────────────────────────────────────────────────
-const W   = 260, H = 260, CX = W / 2, CY = H / 2, SR = 58;
-const ND  = 72;
-const NP  = 72;
-const PK  = 3.8;
+const W  = 260, H = 260, CX = W / 2, CY = H / 2, SR = 58;
+const ND = 72;
+const NP = 72;
+const PK = 2.6; // ↓ from 3.8 — gentler scatter-return force
 
 // ─── types ────────────────────────────────────────────────────────────────────
 type RGB = readonly [number, number, number];
@@ -27,9 +27,14 @@ function rz(v: V3, a: number): V3 {
   const c = Math.cos(a), s = Math.sin(a);
   return [v[0]*c - v[1]*s, v[0]*s + v[1]*c, v[2]];
 }
+
+// Power-curve depth: back particles approach 0 alpha, front = 1.
+// This makes the 3D revolution obvious rather than "all particles equally bright".
 function depthAlpha(z: number, r: number): number {
-  return 0.14 + 0.86 * Math.max(0, Math.min(1, (z / r) * 0.5 + 0.5));
+  const t = Math.max(0, Math.min(1, (z / r) * 0.5 + 0.5));
+  return 0.04 + 0.96 * Math.pow(t, 1.6);
 }
+
 function isOccluded(p: V3, R: number): boolean {
   const r2 = p[0]*p[0] + p[1]*p[1];
   return r2 < R*R && p[2] < -Math.sqrt(Math.max(0, R*R - r2));
@@ -40,11 +45,21 @@ interface Ring {
   radius: number; tiltX: number; tiltY: number; tiltZ: number;
   speed: number; rgb: RGB;
 }
+
+// ┌──────────────────────────────────────────────────────────────────────────┐
+// │  Three rings:                                                            │
+// │  • Equatorial halo  — gently tilted so it reads as a clear ellipse,    │
+// │                       not a 2-D circle                                  │
+// │  • X arm ①  — steep tiltX (~vertical), tiltZ +0.52 → upper-right arc  │
+// │  • X arm ②  — mirror tiltZ  –0.52, opposite speed → lower-left arc    │
+// │    Together ① and ② form an × when viewed straight-on.                │
+// └──────────────────────────────────────────────────────────────────────────┘
 const RINGS: Ring[] = [
-  { radius: 118, tiltX: 1.45, tiltY: 0.00, tiltZ:  0.06, speed:  0.55, rgb: [0,  200, 255] },
-  { radius:  85, tiltX: 0.94, tiltY: 0.28, tiltZ:  0.52, speed: -0.38, rgb: [140, 80, 255] },
-  { radius:  62, tiltX: 0.18, tiltY: 0.48, tiltZ: -0.72, speed:  0.22, rgb: [170,210, 255] },
+  { radius: 112, tiltX: 0.42, tiltY: 0.08, tiltZ:  0.00, speed:  0.42, rgb: [0,   200, 255] },
+  { radius:  92, tiltX: 1.38, tiltY: 0.15, tiltZ:  0.52, speed:  0.36, rgb: [140,  80, 255] },
+  { radius:  92, tiltX: 1.38, tiltY: 0.15, tiltZ: -0.52, speed: -0.36, rgb: [80,  190, 255] },
 ];
+
 function ringPos3D(ring: Ring, phase: number, t: number): V3 {
   const θ = phase + t * ring.speed;
   let p: V3 = [Math.cos(θ) * ring.radius, Math.sin(θ) * ring.radius, 0];
@@ -72,13 +87,13 @@ const _fx = new Float64Array(ND);
 const _fy = new Float64Array(ND);
 
 function stepMesh(
-  mesh:  MeshPt[],
-  dt:    number,
-  pullX: number | null,
-  pullY: number | null,
+  mesh:    MeshPt[],
+  dt:      number,
+  pullX:   number | null,
+  pullY:   number | null,
   stretch: number,
-  hovX:  number | null,
-  hovY:  number | null,
+  hovX:    number | null,
+  hovY:    number | null,
 ): void {
   const K = 60, D = 5.8, T = 20;
   _fx.fill(0); _fy.fill(0);
@@ -90,7 +105,6 @@ function stepMesh(
 
     _fx[i] += -K * (m.x - m.bx);
     _fy[i] += -K * (m.y - m.by);
-
     _fx[i] += T * (prev.x + next.x - 2 * m.x);
     _fy[i] += T * (prev.y + next.y - 2 * m.y);
 
@@ -141,9 +155,9 @@ function meshRadiusAt(mesh: MeshPt[], angle: number): number {
   const fi = (a / (Math.PI*2)) * ND;
   const i0 = Math.floor(fi) % ND;
   const i1 = (i0 + 1) % ND;
-  const t  = fi - Math.floor(fi);
-  const x  = mesh[i0].x*(1-t) + mesh[i1].x*t;
-  const y  = mesh[i0].y*(1-t) + mesh[i1].y*t;
+  const tt = fi - Math.floor(fi);
+  const x  = mesh[i0].x*(1-tt) + mesh[i1].x*tt;
+  const y  = mesh[i0].y*(1-tt) + mesh[i1].y*tt;
   return Math.sqrt(x*x + y*y);
 }
 
@@ -164,6 +178,7 @@ interface Particle {
   vx: number; vy: number;
   scattered: boolean; age: number;
 }
+
 function makeParticles(): Particle[] {
   return RINGS.flatMap(ring =>
     Array.from({ length: NP }, (_, i) => ({
@@ -181,14 +196,14 @@ interface Wave {
   alpha: number; rgb: RGB; screen: boolean; spd: number;
 }
 
-// ─── Drawing ──────────────────────────────────────────────────────────────────
+// ─── Drawing helpers ──────────────────────────────────────────────────────────
 function meshPath(ctx: CanvasRenderingContext2D, mesh: MeshPt[]): void {
   ctx.beginPath();
   for (let i = 0; i <= ND; i++) {
     const m0 = mesh[(i - 1 + ND) % ND];
-    const m1 = mesh[i           % ND];
-    const m2 = mesh[(i + 1)     % ND];
-    const m3 = mesh[(i + 2)     % ND];
+    const m1 = mesh[i            % ND];
+    const m2 = mesh[(i + 1)      % ND];
+    const m3 = mesh[(i + 2)      % ND];
     const c1x = m1.x + (m2.x - m0.x) / 6;
     const c1y = m1.y + (m2.y - m0.y) / 6;
     const c2x = m2.x - (m3.x - m1.x) / 6;
@@ -260,49 +275,107 @@ function drawSphere(
   ctx.restore();
 }
 
+// ─── Tentacle ─────────────────────────────────────────────────────────────────
+// Three rendering passes (outer glow, iridescent shimmer, bright core).
+// Control points oscillate at two different frequencies → rubber-rope wiggle.
+// Colour cycles between acc and accent-purple in sync with the wiggle.
 function drawTentacle(
-  oc: CanvasRenderingContext2D,
+  oc:      CanvasRenderingContext2D,
   ox: number, oy: number,
   mx: number, my: number,
-  acc: RGB, stretch: number,
+  acc:     RGB,
+  stretch: number,
+  t:       number,
 ): void {
   if (stretch < 0.02) return;
-  const [r, g, b] = acc;
+  const [r1, g1, b1] = acc;
   const dx = mx - ox, dy = my - oy;
   const d  = Math.sqrt(dx*dx + dy*dy);
   if (d < 4) return;
-  const nx = -dy/d, ny = dx/d;
-  const w  = Math.max(1.5, SR * 0.38 * (1 - stretch*0.75));
+  const nx = -dy / d, ny = dx / d;
 
-  const c1x = ox + dx*0.28 + nx*w*1.5,  c1y = oy + dy*0.28 + ny*w*1.5;
-  const c2x = ox + dx*0.72 - nx*w*0.55, c2y = oy + dy*0.72 - ny*w*0.55;
+  // Width tapers as you stretch further — rubber thins under tension
+  const w = Math.max(2, SR * 0.40 * (1 - stretch * 0.72));
+
+  // Two-frequency wiggle → organic, non-repeating rubber motion
+  const a1 = stretch * 30 * Math.sin(t * 9.2);
+  const a2 = stretch * 22 * Math.sin(t * 5.7 + 1.8);
+
+  // Main bezier spine
+  const c1x = ox + dx * 0.22 + nx * a1;
+  const c1y = oy + dy * 0.22 + ny * a1;
+  const c2x = ox + dx * 0.70 - nx * a2;
+  const c2y = oy + dy * 0.70 - ny * a2;
+
+  // Slightly offset second spine for iridescent layer
+  const a1b = stretch * 24 * Math.sin(t * 9.2 + 0.5);
+  const a2b = stretch * 18 * Math.sin(t * 5.7 + 2.3);
+  const c1bx = ox + dx * 0.22 + nx * a1b;
+  const c1by = oy + dy * 0.22 + ny * a1b;
+  const c2bx = ox + dx * 0.70 - nx * a2b;
+  const c2by = oy + dy * 0.70 - ny * a2b;
+
+  // Main colour pulse: acc → purple
+  const pulse  = (Math.sin(t * 5.8)       + 1) * 0.5;
+  const pulse2 = (Math.sin(t * 3.4 + 0.9) + 1) * 0.5;
+  const cr = (r1 + (140 - r1) * stretch * pulse)  | 0;
+  const cg = (g1 + ( 80 - g1) * stretch * pulse)  | 0;
+  const cb = (b1 + (255 - b1) * stretch * pulse)  | 0;
+
+  // Iridescent shimmer colour: acc → warm cyan-white
+  const ir = (r1 + (160 - r1) * stretch * pulse2 * 0.8) | 0;
+  const ig = (g1 + (240 - g1) * stretch * pulse2 * 0.5) | 0;
+  const ib = (b1 + (255 - b1) * stretch * pulse2 * 0.9) | 0;
+
+  const alpha = 0.45 + stretch * 0.45;
 
   oc.save();
-  oc.lineCap     = "round";
-  oc.shadowColor = `rgba(${r},${g},${b},0.75)`;
-  oc.shadowBlur  = 22;
-  oc.strokeStyle = `rgba(${r},${g},${b},${(0.45 + stretch*0.4).toFixed(2)})`;
-  oc.lineWidth   = w * 2.4;
-  oc.beginPath(); oc.moveTo(ox, oy); oc.bezierCurveTo(c1x, c1y, c2x, c2y, mx, my); oc.stroke();
+  oc.lineCap = "round";
 
+  // ── Pass 1: wide outer glow — main shifting colour ────────────────────────
+  oc.shadowColor = `rgba(${cr},${cg},${cb},0.95)`;
+  oc.shadowBlur  = 28 + stretch * 20;
+  oc.strokeStyle = `rgba(${cr},${cg},${cb},${alpha})`;
+  oc.lineWidth   = w * 2.8;
+  oc.beginPath();
+  oc.moveTo(ox, oy);
+  oc.bezierCurveTo(c1x, c1y, c2x, c2y, mx, my);
+  oc.stroke();
+
+  // ── Pass 2: iridescent shimmer — slightly different spine + colour ────────
+  oc.shadowColor = `rgba(${ir},${ig},${ib},0.75)`;
+  oc.shadowBlur  = 14;
+  oc.strokeStyle = `rgba(${ir},${ig},${ib},${alpha * 0.65})`;
+  oc.lineWidth   = w * 1.4;
+  oc.beginPath();
+  oc.moveTo(ox, oy);
+  oc.bezierCurveTo(c1bx, c1by, c2bx, c2by, mx, my);
+  oc.stroke();
+
+  // ── Pass 3: bright white core — thin, crisp centre line ──────────────────
   oc.shadowBlur  = 5;
-  oc.strokeStyle = `rgba(255,255,255,${(0.4 + stretch*0.35).toFixed(2)})`;
-  oc.lineWidth   = w * 0.38;
-  oc.beginPath(); oc.moveTo(ox, oy); oc.bezierCurveTo(c1x, c1y, c2x, c2y, mx, my); oc.stroke();
+  oc.shadowColor = "rgba(255,255,255,0.9)";
+  oc.strokeStyle = `rgba(255,255,255,${0.28 + stretch * 0.50})`;
+  oc.lineWidth   = w * 0.28;
+  oc.beginPath();
+  oc.moveTo(ox, oy);
+  oc.bezierCurveTo(c1x, c1y, c2x, c2y, mx, my);
+  oc.stroke();
+
   oc.restore();
 }
 
-function drawWave(ctx: CanvasRenderingContext2D, w: Wave): void {
-  const [r, g, b] = w.rgb;
-  const a = w.alpha * (1 - w.r / w.maxR);
+function drawWave(ctx: CanvasRenderingContext2D, wv: Wave): void {
+  const [r, g, b] = wv.rgb;
+  const a = wv.alpha * (1 - wv.r / wv.maxR);
   if (a <= 0) return;
   ctx.save();
   ctx.shadowColor = `rgba(${r},${g},${b},${a.toFixed(3)})`;
   ctx.shadowBlur  = 12;
   ctx.strokeStyle = `rgba(${r},${g},${b},${a.toFixed(3)})`;
-  ctx.lineWidth   = 2.6 * (1 - w.r/w.maxR) + 0.4;
+  ctx.lineWidth   = 2.6 * (1 - wv.r/wv.maxR) + 0.4;
   ctx.beginPath();
-  ctx.arc(w.x, w.y, w.r, 0, Math.PI*2);
+  ctx.arc(wv.x, wv.y, wv.r, 0, Math.PI*2);
   ctx.stroke();
   ctx.restore();
 }
@@ -342,12 +415,8 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
   const canvasRef  = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const frameRef   = useRef<number | null>(null);
-  // FIX 1: useRef(0) — performance.now() is impure and cannot be called during render.
-  // The actual timestamp is captured inside the effect below.
   const t0Ref      = useRef(0);
   const propsRef   = useRef({ dragging, hasFiles, isSending });
-  // FIX 2: removed propsRef.current = ... from render body — refs must not be
-  // written during render. Moved to a dedicated sync effect below.
 
   const meshRef      = useRef<MeshPt[]>(makeMesh());
   const particlesRef = useRef<Particle[]>(makeParticles());
@@ -356,28 +425,20 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
   const accentRef    = useRef<RGB>([0, 200, 255]);
 
   const hoverRef = useRef<{ cx: number; cy: number } | null>(null);
-  const dragRef  = useRef({
-    active: false, cx: 0, cy: 0, sx: 0, sy: 0, stretch: 0,
-  });
+  const dragRef  = useRef({ active: false, cx: 0, cy: 0, sx: 0, sy: 0, stretch: 0 });
   const cleanupDragRef = useRef<(() => void) | null>(null);
 
-  // FIX 2: sync props into ref outside render
   useEffect(() => {
     propsRef.current = { dragging, hasFiles, isSending };
   }, [dragging, hasFiles, isSending]);
 
   useEffect(() => {
-    // FIX 1: capture start time inside the effect, not during render
     t0Ref.current = performance.now();
 
     const canvasMaybe  = canvasRef.current;
     const overlayMaybe = overlayRef.current;
     if (!canvasMaybe || !overlayMaybe) return;
 
-    // FIX 3: explicitly typed non-null bindings after the guard above.
-    // TypeScript narrows in the immediate scope but loses that narrowing when
-    // the same variables are captured in nested functions. Rebinding to typed
-    // consts propagates the non-null type into every closure below.
     const canvasEl:  HTMLCanvasElement = canvasMaybe;
     const overlayEl: HTMLCanvasElement = overlayMaybe;
 
@@ -432,47 +493,54 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
         hover && !drag.active ? hover.cy : null,
       );
 
+      // ── Update shockwave rings ─────────────────────────────────────────────
       for (let i = waves.length - 1; i >= 0; i--) {
-        const w = waves[i];
-        w.r      += w.spd * dt * 520;
-        w.alpha  *= (1 - dt * 1.9);
-        if (w.r >= w.maxR || w.alpha < 0.006) waves.splice(i, 1);
+        const wv = waves[i];
+        wv.r     += wv.spd * dt * 520;
+        wv.alpha *= (1 - dt * 1.9);
+        if (wv.r >= wv.maxR || wv.alpha < 0.006) waves.splice(i, 1);
       }
 
+      // ── Update scattered particles ─────────────────────────────────────────
       for (const p of ps) {
         if (!p.scattered) continue;
         p.vy  += 55 * dt;
         p.vx  *= 0.992; p.vy *= 0.992;
         p.sx  += p.vx * dt; p.sy += p.vy * dt;
         p.age += dt;
-        if (p.sx < -40) p.vx =  Math.abs(p.vx) * 0.35;
+
+        if (p.sx < -40)   p.vx =  Math.abs(p.vx) * 0.35;
         if (p.sx > SW+40) p.vx = -Math.abs(p.vx) * 0.35;
-        if (p.sy < -40) p.vy =  Math.abs(p.vy) * 0.35;
+        if (p.sy < -40)   p.vy =  Math.abs(p.vy) * 0.35;
         if (p.sy > SH+40) p.vy = -Math.abs(p.vy) * 0.35;
 
-        if (p.age > 1.4) {
+        // ── Slow return: wait 2.8 s before homing; gentle spring ────────────
+        if (p.age > 2.8) {
           const p3  = ringPos3D(p.ring, p.phase, t);
           const hsx = p3[0] + CX + rect.left;
           const hsy = p3[1] + CY + rect.top;
           const ddx = hsx - p.sx, ddy = hsy - p.sy;
-          const rK  = Math.min(PK * (p.age - 1.4) * 1.8, 14);
+          const rK  = Math.min(PK * (p.age - 2.8) * 0.85, 7);
           p.vx     += ddx * rK * dt * 60;
           p.vy     += ddy * rK * dt * 60;
-          p.vx *= 0.91; p.vy *= 0.91;
-          if (Math.sqrt(ddx*ddx + ddy*ddy) < 8 && Math.abs(p.vx) < 6 && Math.abs(p.vy) < 6) {
+          p.vx     *= 0.93; p.vy *= 0.93;
+          if (Math.sqrt(ddx*ddx + ddy*ddy) < 12 && Math.abs(p.vx) < 8 && Math.abs(p.vy) < 8) {
             p.scattered = false; p.age = 0;
           }
         }
       }
 
+      // ── Main canvas ────────────────────────────────────────────────────────
       ctx.clearRect(0, 0, W, H);
 
+      // Ambient glow
       const ambAlpha = d ? 0.22 : f ? 0.12 : 0.07;
       const amb = ctx.createRadialGradient(CX, CY, SR*0.4, CX, CY, W*0.68);
       amb.addColorStop(0, `rgba(${ar},${ag},${ab},${ambAlpha})`);
       amb.addColorStop(1, `rgba(${ar},${ag},${ab},0)`);
       ctx.fillStyle = amb; ctx.fillRect(0, 0, W, H);
 
+      // Lighting vectors
       const lz  = 0.6;
       const lnx = hover ? (hover.cx - CX)/W : -0.4;
       const lny = hover ? (hover.cy - CY)/H : -0.6;
@@ -485,62 +553,96 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
       const hl  = Math.sqrt(hx*hx + hy*hy + hz*hz);
       const hxn = hx/hl, hyn = hy/hl;
 
-      drawSphere(ctx, mesh, acc, lxn, lynN, lzn, hxn, hyn);
-
+      // ── PAINTER'S PASS 1: ring particles that sit BEHIND the sphere ────────
+      // Drawn before drawSphere so the sphere canvas-fill naturally covers them
+      // when they pass through the silhouette — giving true 3-D revolution.
       for (const p of ps) {
         if (p.scattered) continue;
-        const p3  = ringPos3D(p.ring, p.phase, t);
-        const R   = meshRadiusAt(mesh, Math.atan2(p3[1], p3[0]));
-        if (isOccluded(p3, R)) continue;
-        const a   = depthAlpha(p3[2], p.ring.radius);
+        const p3 = ringPos3D(p.ring, p.phase, t);
+        if (p3[2] >= 0) continue;                                  // skip front half
+        const R  = meshRadiusAt(mesh, Math.atan2(p3[1], p3[0]));
+        if (isOccluded(p3, R)) continue;                           // behind silhouette
+        const a  = depthAlpha(p3[2], p.ring.radius);
+        if (a < 0.01) continue;
         const [pr, pg, pb] = p.ring.rgb;
         ctx.save();
-        ctx.shadowColor = `rgba(${pr},${pg},${pb},${a})`; ctx.shadowBlur = p.size * 3.8;
-        ctx.globalAlpha = a; ctx.fillStyle = `rgb(${pr},${pg},${pb})`;
+        ctx.shadowColor = `rgba(${pr},${pg},${pb},${a})`;
+        ctx.shadowBlur  = p.size * 3.2;
+        ctx.globalAlpha = a;
+        ctx.fillStyle   = `rgb(${pr},${pg},${pb})`;
         ctx.beginPath(); ctx.arc(p3[0]+CX, p3[1]+CY, p.size, 0, Math.PI*2); ctx.fill();
         ctx.restore();
       }
 
-      for (const w of waves) if (!w.screen) drawWave(ctx, w);
+      // ── PAINTER'S PASS 2: sphere itself ───────────────────────────────────
+      drawSphere(ctx, mesh, acc, lxn, lynN, lzn, hxn, hyn);
+
+      // ── PAINTER'S PASS 3: ring particles that sit IN FRONT of the sphere ──
+      for (const p of ps) {
+        if (p.scattered) continue;
+        const p3 = ringPos3D(p.ring, p.phase, t);
+        if (p3[2] < 0) continue;                                   // skip back half
+        const R  = meshRadiusAt(mesh, Math.atan2(p3[1], p3[0]));
+        if (isOccluded(p3, R)) continue;
+        const a  = depthAlpha(p3[2], p.ring.radius);
+        const [pr, pg, pb] = p.ring.rgb;
+        ctx.save();
+        ctx.shadowColor = `rgba(${pr},${pg},${pb},${a})`;
+        ctx.shadowBlur  = p.size * 3.8;
+        ctx.globalAlpha = a;
+        ctx.fillStyle   = `rgb(${pr},${pg},${pb})`;
+        ctx.beginPath(); ctx.arc(p3[0]+CX, p3[1]+CY, p.size, 0, Math.PI*2); ctx.fill();
+        ctx.restore();
+      }
+
+      // Non-screen shockwave rings
+      for (const wv of waves) if (!wv.screen) drawWave(ctx, wv);
 
       drawLabel(ctx, state, acc);
 
+      // ── Overlay canvas ─────────────────────────────────────────────────────
       oc.clearRect(0, 0, SW, SH);
 
+      // Scattered (launched) particles on the full-screen overlay
       for (const p of ps) {
         if (!p.scattered) continue;
         const [pr, pg, pb] = p.ring.rgb;
         const age   = Math.min(p.age, 3) / 3;
         const alpha = Math.max(0.1, 1 - age*0.55);
         oc.save();
-        oc.shadowColor = `rgba(${pr},${pg},${pb},${alpha})`; oc.shadowBlur = p.size * 4.5;
-        oc.globalAlpha = alpha; oc.fillStyle = `rgb(${pr},${pg},${pb})`;
+        oc.shadowColor = `rgba(${pr},${pg},${pb},${alpha})`;
+        oc.shadowBlur  = p.size * 4.5;
+        oc.globalAlpha = alpha;
+        oc.fillStyle   = `rgb(${pr},${pg},${pb})`;
         oc.beginPath(); oc.arc(p.sx, p.sy, p.size*(1 + age*0.7), 0, Math.PI*2); oc.fill();
         oc.restore();
       }
 
+      // Tentacle — now receives `t` for wiggle and colour-shift
       if (drag.active && drag.stretch > 0.02) {
         const tip = meshTip(mesh, drag.cx, drag.cy);
-        drawTentacle(oc, rect.left + tip.x, rect.top + tip.y, drag.sx, drag.sy, acc, drag.stretch);
+        drawTentacle(
+          oc,
+          rect.left + tip.x, rect.top + tip.y,
+          drag.sx, drag.sy,
+          acc, drag.stretch, t,
+        );
       }
 
-      for (const w of waves) if (w.screen) drawWave(oc, w);
+      // Screen-space shockwave rings
+      for (const wv of waves) if (wv.screen) drawWave(oc, wv);
 
       frameRef.current = requestAnimationFrame(draw);
     }
 
     frameRef.current = requestAnimationFrame(draw);
 
-    // ─── impact ────────────────────────────────────────────────────────────────
-    // FIX 4: moved inside the effect so that particlesRef mutations are
-    // co-located with the draw loop that reads them. The React Compiler's
-    // immutability rule forbids mutating a ref.current that an effect has
-    // already read when the mutation happens outside that effect's scope.
+    // ── Impact blast ───────────────────────────────────────────────────────
     function launchImpact(stretch: number, ev: globalThis.MouseEvent) {
-      const rect  = canvasEl.getBoundingClientRect();
-      const acc   = accentRef.current;
+      const rect      = canvasEl.getBoundingClientRect();
+      const acc       = accentRef.current;
       const [r, g, b] = acc;
-      const csx   = rect.left + CX, csy = rect.top + CY;
+      const csx = rect.left + CX, csy = rect.top + CY;
 
       const mesh = meshRef.current;
       for (let i = 0; i < ND; i++) {
@@ -549,7 +651,6 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
       }
 
       const waves = wavesRef.current;
-
       for (let i = 0; i < 3; i++) {
         const ii = i;
         setTimeout(() => {
@@ -557,7 +658,6 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
             alpha: 0.75+stretch*0.2, rgb: acc, screen: false, spd: 0.16+ii*0.05+stretch*0.1 });
         }, i * 100);
       }
-
       const wCount = 4 + Math.floor(stretch * 4);
       for (let i = 0; i < wCount; i++) {
         const ii = i;
@@ -568,18 +668,18 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
         }, i * 85);
       }
 
-      const ps  = particlesRef.current;
-      const t   = (performance.now() - t0Ref.current) / 1000;
+      const ps = particlesRef.current;
+      const tt = (performance.now() - t0Ref.current) / 1000;
       for (const p of ps) {
-        const p3  = ringPos3D(p.ring, p.phase, t);
+        const p3  = ringPos3D(p.ring, p.phase, tt);
         const psx = p3[0] + CX + rect.left;
         const psy = p3[1] + CY + rect.top;
         const dx  = psx - csx, dy = psy - csy;
-        const d   = Math.sqrt(dx*dx + dy*dy) || 1;
+        const dist = Math.sqrt(dx*dx + dy*dy) || 1;
         const spd = stretch * (280 + Math.random() * 480);
         p.sx = psx; p.sy = psy;
-        p.vx = (dx/d)*spd*(0.5+Math.random()*0.9) + (ev.clientX - window.innerWidth/2)*stretch*0.14;
-        p.vy = (dy/d)*spd*(0.5+Math.random()*0.9) - stretch*90;
+        p.vx = (dx/dist)*spd*(0.5+Math.random()*0.9) + (ev.clientX - window.innerWidth/2)*stretch*0.14;
+        p.vy = (dy/dist)*spd*(0.5+Math.random()*0.9) - stretch*90;
         p.scattered = true; p.age = 0;
       }
 
@@ -596,10 +696,7 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
       });
     }
 
-    // ─── interaction: imperative listeners (FIX 4 cont.) ─────────────────────
-    // Moving all three handlers here lets launchImpact stay in this scope
-    // without needing ref-forwarding gymnastics. The canvas element is already
-    // guaranteed non-null (canvasEl above), so no optional chaining needed.
+    // ── Interaction listeners ──────────────────────────────────────────────
     function onMouseMoveCanvas(e: globalThis.MouseEvent) {
       const r = canvasEl.getBoundingClientRect();
       hoverRef.current = { cx: e.clientX - r.left, cy: e.clientY - r.top };
@@ -622,9 +719,9 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
         const cr = canvasEl.getBoundingClientRect();
         const nx = ev.clientX - cr.left;
         const ny = ev.clientY - cr.top;
-        const dx = nx - CX, dy = ny - CY;
-        const dist  = Math.sqrt(dx*dx + dy*dy);
-        const maxD  = Math.max(window.innerWidth, window.innerHeight) * 0.72;
+        const ddx = nx - CX, ddy = ny - CY;
+        const dist = Math.sqrt(ddx*ddx + ddy*ddy);
+        const maxD = Math.max(window.innerWidth, window.innerHeight) * 0.72;
         dragRef.current.cx      = nx;
         dragRef.current.cy      = ny;
         dragRef.current.sx      = ev.clientX;
