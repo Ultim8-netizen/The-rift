@@ -1,3 +1,4 @@
+// src-tauri/src/lib.rs
 mod android_fs;
 mod discovery;
 mod network;
@@ -25,22 +26,63 @@ async fn get_app_state(state: State<'_, SharedState>) -> Result<AppStatePayload,
     })
 }
 
+/// Returns file metadata for the given paths.
+///
+/// ── Android fix ──────────────────────────────────────────────────────────────
+/// The old implementation called `android_fs::get_file_info` which queries
+/// ContentResolver's `SIZE` column.  That column is `null` for the overwhelming
+/// majority of `content://` URIs returned by the Android file picker, so every
+/// file appeared as 0 bytes in the staging UI.
+///
+/// Worse: it preserved the raw `content://` URI as `StagedFile.path`.  The
+/// file-picker Intent's URI grant is only guaranteed valid *immediately* after
+/// the picker returns.  By the time the user reviews staging and taps Send,
+/// that ephemeral grant is frequently expired.  `copyUriToCache` then fails,
+/// `resolve_paths` returns `Err`, `send_files` returns `Err` to the frontend
+/// *before* `transfer_started` is emitted — the dialogue dismissed via the
+/// invoke-rejection path and nothing ever reached the remote device.
+///
+/// Fix: call `resolve_paths` here (which runs `android_copy_uri` for
+/// `content://` URIs) while the grant is still live.  The file is copied to
+/// the app's private cache directory once; subsequent calls in `send_files`
+/// receive a plain file path and need only `stat` it — no URI, no grant.
+///
+/// On desktop `resolve_paths` is a plain `tokio::fs::metadata` call, so
+/// desktop behaviour is unchanged.
 #[tauri::command]
 async fn get_file_metadata(paths: Vec<String>) -> Result<Vec<StagedFile>, String> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(paths.len());
     for path in paths {
-        let p = path.clone();
-        let info = tokio::task::spawn_blocking(move || android_fs::get_file_info(&p))
-            .await
-            .unwrap_or_else(|_| android_fs::FileInfo {
-                name: "unknown".to_string(),
-                size: 0,
-            });
-        out.push(StagedFile {
-            name: info.name,
-            path,
-            size_bytes: info.size,
-        });
+        // Borrow `path` into a single-element slice so we can fall back to it
+        // in the error branch without having moved it.
+        match android_fs::resolve_paths(std::slice::from_ref(&path)).await {
+            Ok(mut resolved) if !resolved.is_empty() => {
+                let r = resolved.remove(0);
+                out.push(StagedFile {
+                    name: r.name,
+                    // On Android this is the cache path; on desktop the
+                    // original path is returned unchanged.
+                    path: r.real_path,
+                    size_bytes: r.size,
+                });
+            }
+            _ => {
+                // Copy failed (e.g. permission denied for a cloud URI that has
+                // not been downloaded yet).  Show the file with unknown size so
+                // the user sees it in staging; attempting to send will produce a
+                // descriptive error via the normal send_files error path.
+                let name = std::path::Path::new(&path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                out.push(StagedFile {
+                    name,
+                    path,
+                    size_bytes: 0,
+                });
+            }
+        }
     }
     Ok(out)
 }
@@ -118,7 +160,29 @@ async fn send_files(
         e.to_string()
     })?;
 
-    let temp_paths: Vec<Option<String>> = resolved.iter().map(|r| r.temp_path.clone()).collect();
+    // ── Temp-path cleanup ────────────────────────────────────────────────────
+    // Two sources of temporary cache files that must be removed after transfer:
+    //
+    //   1. Files copied to cache *right now* by resolve_paths (content:// URIs
+    //      that somehow bypassed get_file_metadata).  These have temp_path set.
+    //
+    //   2. Files pre-staged into cache by get_file_metadata (the normal Android
+    //      path).  resolve_paths treats them as plain files (temp_path = None),
+    //      but they are identifiable by the "rift_send_" filename prefix that
+    //      android_copy_uri always uses.
+    let mut temp_paths: Vec<Option<String>> = resolved.iter().map(|r| r.temp_path.clone()).collect();
+
+    #[cfg(target_os = "android")]
+    for p in &file_paths {
+        if std::path::Path::new(p)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("rift_send_"))
+            .unwrap_or(false)
+        {
+            temp_paths.push(Some(p.clone()));
+        }
+    }
 
     let files: Vec<state::FileEntry> = resolved
         .into_iter()
@@ -168,7 +232,6 @@ async fn send_files(
     }
 
     // Capture target address before `target` is moved into send_files_to_device.
-    // Needed to send the cancel signal to the receiver on permanent failure.
     let target_ip   = target.ip.clone();
     let target_port = target.port;
 
@@ -186,6 +249,7 @@ async fn send_files(
         )
         .await;
 
+        // Clean up all temp/pre-staged cache files regardless of outcome.
         for temp in &temp_paths {
             if let Some(p) = temp {
                 if let Err(e) = tokio::fs::remove_file(p).await {
@@ -201,15 +265,11 @@ async fn send_files(
                 eprintln!("[Send] Transfer error: {e}");
 
                 if msg.contains("declined by receiver") {
-                    // Receiver already cleaned its own state via handle_decline.
                     let _ = app_clone.emit(
                         "transfer_declined",
                         &serde_json::json!({ "transferId": tid }),
                     );
                 } else {
-                    // Permanent failure — notify the receiver so it can clean up
-                    // active_stream_transfers and show an error to its user.
-                    // Fire-and-forget: if the receiver is offline this is a no-op.
                     let cancel_url = format!(
                         "http://{}:{}/cancel/{}",
                         target_ip, target_port, tid
