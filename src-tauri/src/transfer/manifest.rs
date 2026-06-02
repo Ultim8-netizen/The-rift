@@ -13,20 +13,22 @@
 //! skips the post-assembly full-file hash check when this field is empty.
 //! Per-chunk BLAKE3 is comprehensive: every byte of every chunk is individually
 //! verified, making a full-file second pass redundant for local LAN transfers.
-//! This eliminates two full sequential reads of the source file (one on the
-//! sender during manifest build, one on the receiver after assembly) — for
-//! large files this was 30-90 seconds of wasted time before a byte moved.
 //!
 //! Chunk size
 //! ──────────
-//! 1 MB.  Previous value was 512 KB.  On a local hotspot with 2 ms RTT and
-//! 10-100 MB/s throughput, 1 MB chunks reduce the total ACK round-trip count
-//! by 2× while keeping per-chunk BLAKE3 fast (<1 ms).
+//! 2 MiB.  Previous value was 1 MiB.  Doubling the chunk size halves the total
+//! ACK round-trip count, cuts BLAKE3 call overhead per file, and improves
+//! sequential read-ahead on both sender and receiver disks.  On a local 5 GHz
+//! hotspot at 200 Mbps, one 2 MiB chunk takes ~80 ms to transmit — well above
+//! the 2 ms LAN RTT — so the pipeline (depth 2 per stream) fully covers the gap
+//! without over-buffering.
 
 use serde::{Deserialize, Serialize};
 
-/// 1 MB — optimal chunk size for local WiFi hotspot transfers.
-pub const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
+/// 2 MiB — optimal chunk size for local WiFi hotspot transfers.
+/// Large enough to amortise BLAKE3 call overhead and per-chunk ACK RTT,
+/// small enough that a single NACK retransmit is cheap.
+pub const DEFAULT_CHUNK_SIZE: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,7 +109,7 @@ pub async fn build_manifest(
 /// Full-file hash is omitted; per-chunk verification provides equivalent coverage.
 fn build_file_manifest(
     name:       &str,
-    _path:      &str,   // not read — hashes computed during send
+    _path:      &str,
     size_bytes: u64,
 ) -> anyhow::Result<FileManifest> {
     if size_bytes == 0 {

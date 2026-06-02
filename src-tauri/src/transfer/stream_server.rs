@@ -5,31 +5,16 @@
 //! to their byte offset in the pre-allocated destination file via a
 //! per-connection file handle (no shared mutex).
 //!
-//! Finalization
-//! ────────────
-//! The first connection to write the last missing chunk atomically claims the
-//! `finalized` flag and spawns `finalize_file`.  All other claim attempts are
-//! no-ops.
-//!
-//! Reconnecting senders
-//! ────────────────────
-//! Workers on the sender survive transient TCP failures by reconnecting with
-//! the same transfer_id and file_index.  The server handles this transparently:
-//!   - Transfer state persists in `active_stream_transfers` across connections.
-//!   - Duplicate chunks (re-sent after reconnect) are detected via the
-//!     `completed_chunks` HashSet and ACK'd without re-writing.
-//!   - `check_all_workers_done` only increments the closed-connection counter;
-//!     it does NOT emit `transfer_error` based on connection count, because
-//!     reconnecting workers create more connections than `streams_expected`.
-//!     Error detection is the sender's responsibility.
-//!
-//! Full-file hash
-//! ──────────────
-//! `FileManifest::file_blake3` is empty when the sender uses lazy chunk
-//! hashing (current default).  When `file_blake3` is empty, `finalize_file`
-//! skips the full-file hash pass and emits `transfer_complete` directly.
-//! Per-chunk BLAKE3 verification (enforced in the receive loop below) covers
-//! every byte, making a second sequential read for full-file hashing redundant.
+//! Receiver-side optimisations in this revision
+//! ─────────────────────────────────────────────
+//! • TCP_NODELAY on every accepted socket — ACK responses go out immediately
+//!   rather than being held by Nagle's algorithm (up to 40 ms delay per ACK).
+//! • BufReader capacity = STREAM_SERVER_READ_BUF (4 MiB) — one kernel read()
+//!   syscall fills the buffer with a full 2 MiB chunk body rather than 256
+//!   successive 8 KiB reads (the tokio::io::BufReader default).
+//! • SO_RCVBUF = 8 MiB on the listening socket — inherits to all accepted
+//!   connections, preventing the sender's TCP window from stalling while the
+//!   application layer is occupied with disk I/O.
 
 use crate::state::SharedState;
 use std::sync::Arc;
@@ -38,12 +23,27 @@ use std::io::SeekFrom;
 use tauri::{AppHandle, Emitter};
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 
 pub const STREAM_PORT: u16 = 7477;
 
+/// BufReader capacity for the receive side.
+///
+/// With 2 MiB chunks and a sender using BufWriter flush bursts, the full chunk
+/// body arrives in one OS-level burst.  A 4 MiB BufReader absorbs it in a
+/// single read() syscall versus 256 syscalls with the 8 KiB default.
+const STREAM_SERVER_READ_BUF: usize = 4 * 1024 * 1024;
+
 pub async fn start_stream_server(state: SharedState, app: AppHandle) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(format!("0.0.0.0:{STREAM_PORT}")).await?;
+    // Use TcpSocket so we can set SO_RCVBUF before binding.  The large recv
+    // buffer lets the OS absorb a full pipeline's worth of incoming chunk data
+    // without stalling the sender's TCP window when disk I/O is busy.
+    let sock = tokio::net::TcpSocket::new_v4()?;
+    sock.set_reuseaddr(true)?;
+    sock.set_recv_buffer_size(8 * 1024 * 1024)?;
+    sock.bind(format!("0.0.0.0:{STREAM_PORT}").parse()?)?;
+    let listener = sock.listen(1024)?;
+
     eprintln!("[StreamServer] Bound on :{STREAM_PORT}");
     loop {
         match listener.accept().await {
@@ -59,6 +59,10 @@ pub async fn start_stream_server(state: SharedState, app: AppHandle) -> anyhow::
 }
 
 async fn handle_connection(stream: TcpStream, state: SharedState, app: AppHandle) {
+    // TCP_NODELAY: ACK responses are ~12 bytes.  Without this, Nagle holds them
+    // until either a 40 ms delayed-ACK timer fires or enough data accumulates,
+    // adding 40 ms to every chunk's round trip on the sender side.
+    let _ = stream.set_nodelay(true);
     if let Err(e) = handle_connection_inner(stream, state, app).await {
         eprintln!("[StreamServer] Connection error: {e}");
     }
@@ -70,7 +74,11 @@ async fn handle_connection_inner(
     app:    AppHandle,
 ) -> anyhow::Result<()> {
     let (read_half, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(read_half);
+
+    // 4 MiB BufReader: one kernel read() per 2 MiB chunk body instead of 256.
+    // When the sender flushes a full pipeline burst, the BufReader absorbs both
+    // chunk bodies at once so subsequent read_exact calls hit memory, not the kernel.
+    let mut reader = BufReader::with_capacity(STREAM_SERVER_READ_BUF, read_half);
     let mut line   = String::new();
 
     macro_rules! read_line {
@@ -114,8 +122,8 @@ async fn handle_connection_inner(
     };
 
     // ── Per-connection write handle ───────────────────────────────────────────
-    // Each worker owns its own handle — writes to non-overlapping regions are
-    // safe and fully parallel with no mutex serialization.
+    // Each worker owns its own handle — writes to non-overlapping byte ranges
+    // are fully parallel with no mutex serialisation.
     let dest_file_result = OpenOptions::new()
         .write(true)
         .open(&file_state.dest_path)
@@ -206,7 +214,10 @@ async fn handle_connection_inner(
         };
         let expected_blake3 = parts[4].to_string();
 
-        // Read chunk bytes
+        // Read chunk bytes.
+        // With a 4 MiB BufReader and 2 MiB chunks, read_exact is served from
+        // the already-filled internal buffer in the common pipeline case —
+        // zero additional kernel syscalls.
         let mut buf = vec![0u8; size];
         if let Err(e) = reader.read_exact(&mut buf).await {
             eprintln!("[StreamServer] read_exact failed chunk {chunk_id}: {e}");
@@ -216,7 +227,8 @@ async fn handle_connection_inner(
             break;
         }
 
-        // Verify BLAKE3 (sender computed this lazily at send time)
+        // Verify BLAKE3.  With opt-level = "3" both sides hash at multi-GB/s
+        // via SIMD so this adds under 1 ms per 2 MiB chunk.
         let actual_blake3 = hex::encode(blake3::hash(&buf).as_bytes());
         if actual_blake3 != expected_blake3 {
             eprintln!("[StreamServer] BLAKE3 mismatch chunk {chunk_id}");
@@ -224,7 +236,7 @@ async fn handle_connection_inner(
             continue;
         }
 
-        // Idempotency: skip write if already received (handles reconnect duplicates)
+        // Idempotency: skip write if already received (handles reconnect duplicates).
         {
             let completed = file_state.completed_chunks.lock().await;
             if completed.contains(&chunk_id) {
@@ -234,7 +246,7 @@ async fn handle_connection_inner(
             }
         }
 
-        // Write to dest file via per-connection handle
+        // Write to dest file at the chunk's exact byte offset.
         match dest_file {
             Some(ref mut f) => {
                 f.seek(SeekFrom::Start(byte_offset))
@@ -245,7 +257,7 @@ async fn handle_connection_inner(
                     .map_err(|e| anyhow::anyhow!("Write chunk {chunk_id}: {e}"))?;
             }
             None => {
-                // Finalization already triggered — ACK without re-writing
+                // Finalisation already triggered — ACK without re-writing.
                 writer.write_all(format!("ACK {chunk_id}\n").as_bytes()).await?;
                 continue;
             }
@@ -257,7 +269,9 @@ async fn handle_connection_inner(
             completed.len() == file_state.manifest.total_chunks
         };
 
-        // ACK before (potentially slow) finalization path
+        // ACK before (potentially slow) finalisation path.
+        // TCP_NODELAY ensures this small write goes out immediately so the
+        // sender's pipeline can refill without waiting.
         writer.write_all(format!("ACK {chunk_id}\n").as_bytes()).await?;
 
         let _ = app.emit(
@@ -272,7 +286,8 @@ async fn handle_connection_inner(
             }),
         );
 
-        // Claim finalization atomically — only one connection proceeds
+        // Claim finalisation atomically — only the first connection to complete
+        // the last chunk proceeds; all others are no-ops.
         if all_done && !file_state.finalized.swap(true, Ordering::SeqCst) {
             dest_file = None; // close write handle before hash pass opens read handle
 
@@ -291,15 +306,7 @@ async fn handle_connection_inner(
 }
 
 /// Increments the closed-connection counter and logs it.
-///
 /// Error detection for incomplete transfers is the sender's responsibility.
-/// The sender retries via reconnect and emits `transfer_error` (plus a
-/// `/cancel/:tid` HTTP call to this server) when all retries are exhausted.
-///
-/// We do NOT emit `transfer_error` here based on connection count because
-/// reconnecting workers create more connections than `streams_expected`,
-/// causing the count-based check to fire before the reconnected connections
-/// have finished delivering remaining chunks.
 async fn check_all_workers_done(
     file_state:  &Arc<crate::state::StreamReceiveState>,
     _app:        &AppHandle,
@@ -315,15 +322,10 @@ async fn check_all_workers_done(
 /// Called exactly once per file (atomic `finalized` flag) after the last chunk
 /// lands on disk.
 ///
-/// Full-file BLAKE3 check
-/// ──────────────────────
-/// When `file_blake3` is empty (current default with lazy chunk hashing), the
-/// full-file hash pass is skipped entirely.  Per-chunk BLAKE3 has already
-/// verified every byte; a second sequential read of the assembled file would
-/// add 15-60 s for multi-GB files without providing additional coverage.
-///
-/// If `file_blake3` is non-empty (e.g. from an older sender), the check runs
-/// as before.
+/// When `file_blake3` is empty (current default — per-chunk BLAKE3 already
+/// verified every byte), the full-file hash pass is skipped entirely.
+/// This avoids a second sequential read of the assembled file (15-60 s for
+/// multi-GB files) with no additional integrity benefit.
 async fn finalize_file(
     transfer_id:    String,
     file_index:     usize,
@@ -373,7 +375,6 @@ async fn finalize_file(
             file_state.manifest.name
         );
     } else {
-        // Per-chunk BLAKE3 already verified every byte in the receive loop.
         eprintln!(
             "[StreamServer] File {file_index} complete — per-chunk integrity verified, \
              skipping full-file hash pass ({})",
@@ -400,8 +401,8 @@ async fn finalize_file(
     }
 }
 
-/// Streaming BLAKE3 of an on-disk file.  Only called when `file_blake3` is
-/// non-empty in the manifest (legacy senders).
+/// Streaming BLAKE3 of an on-disk file.
+/// Only called when `file_blake3` is non-empty in the manifest (legacy senders).
 async fn stream_hash_file(path: &std::path::Path) -> anyhow::Result<String> {
     let mut file   = tokio::fs::File::open(path).await?;
     let mut hasher = blake3::Hasher::new();
