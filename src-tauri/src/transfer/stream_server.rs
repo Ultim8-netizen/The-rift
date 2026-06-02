@@ -15,15 +15,18 @@
 //! • SO_RCVBUF = 8 MiB on the listening socket — inherits to all accepted
 //!   connections, preventing the sender's TCP window from stalling while the
 //!   application layer is occupied with disk I/O.
+//! • Single reusable chunk_buf per connection — one Vec allocation per
+//!   connection instead of one per chunk (263 allocations for a 526 MB file).
 
 use crate::state::SharedState;
+use crate::transfer::manifest::DEFAULT_CHUNK_SIZE;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::io::SeekFrom;
 use tauri::{AppHandle, Emitter};
 use tokio::fs::OpenOptions;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, TcpStream};
 
 pub const STREAM_PORT: u16 = 7477;
 
@@ -38,7 +41,7 @@ pub async fn start_stream_server(state: SharedState, app: AppHandle) -> anyhow::
     // Use TcpSocket so we can set SO_RCVBUF before binding.  The large recv
     // buffer lets the OS absorb a full pipeline's worth of incoming chunk data
     // without stalling the sender's TCP window when disk I/O is busy.
-    let sock = tokio::net::TcpSocket::new_v4()?;
+    let sock = TcpSocket::new_v4()?;
     sock.set_reuseaddr(true)?;
     sock.set_recv_buffer_size(8 * 1024 * 1024)?;
     sock.bind(format!("0.0.0.0:{STREAM_PORT}").parse()?)?;
@@ -149,6 +152,11 @@ async fn handle_connection_inner(
         "[StreamServer] worker open — transfer={transfer_id} file={file_index}"
     );
 
+    // Single reusable buffer sized to the largest possible chunk (DEFAULT_CHUNK_SIZE).
+    // Eliminates one Vec allocation per chunk — 263 allocs of 2 MiB each for a
+    // 526 MiB file — replaced by a single allocation per connection lifetime.
+    let mut chunk_buf = vec![0u8; DEFAULT_CHUNK_SIZE];
+
     // ── Chunk receive loop ────────────────────────────────────────────────────
     loop {
         line.clear();
@@ -214,12 +222,11 @@ async fn handle_connection_inner(
         };
         let expected_blake3 = parts[4].to_string();
 
-        // Read chunk bytes.
-        // With a 4 MiB BufReader and 2 MiB chunks, read_exact is served from
-        // the already-filled internal buffer in the common pipeline case —
-        // zero additional kernel syscalls.
-        let mut buf = vec![0u8; size];
-        if let Err(e) = reader.read_exact(&mut buf).await {
+        // Slice the reusable buffer to this chunk's exact size.
+        // read_exact fills only these bytes; blake3::hash and write_all consume
+        // only this slice.  No heap allocation per chunk.
+        let buf = &mut chunk_buf[..size];
+        if let Err(e) = reader.read_exact(buf).await {
             eprintln!("[StreamServer] read_exact failed chunk {chunk_id}: {e}");
             writer.write_all(format!("NACK {chunk_id}\n").as_bytes()).await?;
             drop(dest_file);
@@ -229,7 +236,7 @@ async fn handle_connection_inner(
 
         // Verify BLAKE3.  With opt-level = "3" both sides hash at multi-GB/s
         // via SIMD so this adds under 1 ms per 2 MiB chunk.
-        let actual_blake3 = hex::encode(blake3::hash(&buf).as_bytes());
+        let actual_blake3 = hex::encode(blake3::hash(buf).as_bytes());
         if actual_blake3 != expected_blake3 {
             eprintln!("[StreamServer] BLAKE3 mismatch chunk {chunk_id}");
             writer.write_all(format!("NACK {chunk_id}\n").as_bytes()).await?;
@@ -252,7 +259,7 @@ async fn handle_connection_inner(
                 f.seek(SeekFrom::Start(byte_offset))
                     .await
                     .map_err(|e| anyhow::anyhow!("Seek chunk {chunk_id}: {e}"))?;
-                f.write_all(&buf)
+                f.write_all(buf)
                     .await
                     .map_err(|e| anyhow::anyhow!("Write chunk {chunk_id}: {e}"))?;
             }
@@ -404,6 +411,7 @@ async fn finalize_file(
 /// Streaming BLAKE3 of an on-disk file.
 /// Only called when `file_blake3` is non-empty in the manifest (legacy senders).
 async fn stream_hash_file(path: &std::path::Path) -> anyhow::Result<String> {
+    use tokio::io::AsyncReadExt as _;
     let mut file   = tokio::fs::File::open(path).await?;
     let mut hasher = blake3::Hasher::new();
     let mut buf    = vec![0u8; 8 * 1024 * 1024];
