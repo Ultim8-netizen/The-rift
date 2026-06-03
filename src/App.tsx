@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useDevices } from "@/hooks/useDevices";
 import { useTransferEvents } from "@/hooks/useTransfer";
 import { useTheme } from "@/hooks/useTheme";
@@ -16,30 +16,56 @@ import { TextTransferPanel } from "@/components/TextTransferPanel";
 import { IncomingTextDialog } from "@/components/IncomingTextDialog";
 import { TourOverlay, TOUR_SEEN_KEY } from "@/components/TourOverlay";
 import { HelpPage } from "@/components/HelpPage";
+import { SplashScreen } from "@/components/SplashScreen";
 import { useRiftStore } from "@/store/riftStore";
 
+const SPLASH_KEY = "rift-splash-v1";
+
 export default function App() {
+  // Check once per session — sessionStorage clears when the Tauri webview
+  // is fully closed, so the splash plays on every fresh app launch.
+  const [splashDone, setSplashDone] = useState(() => {
+    return sessionStorage.getItem(SPLASH_KEY) === "1";
+  });
+
+  // Hooks must be called unconditionally. Discovery starts immediately in the
+  // background while the splash plays — devices are often ready by the time
+  // the animation finishes.
   useTheme();
   useDevices();
   useTransferEvents();
 
   const isMobile = useMobile();
 
+  // Tour fires 650 ms after the splash clears, not before.
   useEffect(() => {
+    if (!splashDone) return;
     const t = setTimeout(() => {
       if (!localStorage.getItem(TOUR_SEEN_KEY)) {
         useRiftStore.getState().startTour();
       }
     }, 650);
     return () => clearTimeout(t);
-  }, []);
+  }, [splashDone]);
 
-  // Mobile: full-screen bottom-tab layout
+  // ── Splash ─────────────────────────────────────────────────────────────────
+  if (!splashDone) {
+    return (
+      <SplashScreen
+        onDone={() => {
+          sessionStorage.setItem(SPLASH_KEY, "1");
+          setSplashDone(true);
+        }}
+      />
+    );
+  }
+
+  // ── Mobile ─────────────────────────────────────────────────────────────────
   if (isMobile) {
     return <MobileLayout />;
   }
 
-  // Desktop: three-panel layout unchanged
+  // ── Desktop ────────────────────────────────────────────────────────────────
   return (
     <div
       className="h-screen overflow-hidden font-sans text-rift-text relative select-none"
