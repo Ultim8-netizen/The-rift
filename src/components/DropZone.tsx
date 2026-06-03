@@ -1,77 +1,13 @@
 // src/components/DropZone.tsx
-
 import { useCallback, useEffect, useState } from "react";
-
 import { useRiftStore } from "@/store/riftStore";
 import { useTransferActions } from "@/hooks/useTransfer";
 import { useInvoke } from "@/hooks/useTauri";
-
 import { type StagedFile } from "@/types";
-
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { readDir, stat } from "@tauri-apps/plugin-fs";
-
+import { fmt, expandToPaths } from "@/utils/fileHelpers";
 import { Portal3D } from "./Portal3D";
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function fmt(bytes: number): string {
-  if (!bytes) return "0 B";
-  const k = 1024;
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / k ** i).toFixed(1))} ${units[i]}`;
-}
-
-function joinPath(dir: string, name: string): string {
-  if (!name) return dir;
-  const sep = dir.includes("\\") ? "\\" : "/";
-  return dir.endsWith("/") || dir.endsWith("\\") ? dir + name : dir + sep + name;
-}
-
-async function enumFilesRecursive(dirPath: string): Promise<string[]> {
-  try {
-    const entries = await readDir(dirPath);
-    const results: string[] = [];
-
-    for (const entry of entries) {
-      if (!entry.name) continue;
-      const fullPath = joinPath(dirPath, entry.name);
-
-      if (entry.isDirectory) {
-        results.push(...(await enumFilesRecursive(fullPath)));
-      } else if (entry.isFile) {
-        results.push(fullPath);
-      }
-    }
-
-    return results;
-  } catch {
-    return [];
-  }
-}
-
-async function expandToPaths(rawPaths: string[]): Promise<string[]> {
-  const result: string[] = [];
-
-  for (const p of rawPaths) {
-    try {
-      const info = await stat(p);
-      if (info.isDirectory) {
-        result.push(...(await enumFilesRecursive(p)));
-      } else {
-        result.push(p);
-      }
-    } catch {
-      result.push(p);
-    }
-  }
-
-  return result;
-}
-
-// ─── Component ───────────────────────────────────────────────────────────────
 
 export function DropZone() {
   const [isDragging, setIsDragging] = useState(false);
@@ -88,8 +24,6 @@ export function DropZone() {
 
   const totalBytes = stagedFiles.reduce((acc, f) => acc + f.sizeBytes, 0);
   const canSend    = stagedFiles.length > 0 && !!selectedDevice && !isSending;
-
-  // ── File staging ────────────────────────────────────────────────────────
 
   const stageFromPaths = useCallback(
     async (rawPaths: string[]) => {
@@ -116,26 +50,8 @@ export function DropZone() {
     }
   }
 
-  async function browseFolder() {
-    try {
-      const res = await open({ multiple: false, directory: true });
-      if (!res) return;
-      const dirPath = typeof res === "string" ? res : res[0];
-      if (!dirPath) return;
-      const filePaths = await enumFilesRecursive(dirPath);
-      if (!filePaths.length) return;
-      const files = await call<StagedFile[]>("get_file_metadata", { paths: filePaths });
-      setStagedFiles(files);
-    } catch (e) {
-      console.error(e);
-    }
-  }
-
-  // ── Drag-and-drop listener ───────────────────────────────────────────────
-
   useEffect(() => {
     let unlisten: (() => void) | null = null;
-
     getCurrentWebview()
       .onDragDropEvent((e) => {
         if (e.payload.type === "over") {
@@ -147,14 +63,9 @@ export function DropZone() {
           setIsDragging(false);
         }
       })
-      .then((fn) => {
-        unlisten = fn;
-      });
-
+      .then((fn) => { unlisten = fn; });
     return () => unlisten?.();
   }, [stageFromPaths]);
-
-  // ── Render ──────────────────────────────────────────────────────────────
 
   return (
     <div
@@ -184,25 +95,14 @@ export function DropZone() {
         </p>
       </div>
 
-      {/* Portal */}
-      <Portal3D
-        dragging={isDragging}
-        hasFiles={stagedFiles.length > 0}
-        isSending={isSending}
-      />
+      <Portal3D dragging={isDragging} hasFiles={stagedFiles.length > 0} isSending={isSending} />
 
-      {/* Stage readout / empty prompt */}
       {stagedFiles.length === 0 ? (
-        <EmptyPrompt onBrowse={browse} onBrowseFolder={browseFolder} />
+        <EmptyPrompt onBrowse={browse} />
       ) : (
-        <StageReadout
-          files={stagedFiles}
-          totalBytes={totalBytes}
-          onClear={clearStaged}
-        />
+        <StageReadout files={stagedFiles} totalBytes={totalBytes} onClear={clearStaged} />
       )}
 
-      {/* Target device */}
       {selectedDevice ? (
         <div
           className="flex items-center gap-2 px-3 py-1.5 rounded-full"
@@ -225,7 +125,6 @@ export function DropZone() {
         </p>
       )}
 
-      {/* Actions */}
       <div className="flex items-center gap-3">
         <button
           data-tour="send-btn"
@@ -236,7 +135,6 @@ export function DropZone() {
         >
           {isSending ? "Sending…" : "Send Through"}
         </button>
-
         <StickyNoteButton onClick={() => setStickyNote(true)} />
       </div>
     </div>
@@ -245,26 +143,18 @@ export function DropZone() {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-function EmptyPrompt({
-  onBrowse,
-  onBrowseFolder,
-}: {
-  onBrowse: () => void;
-  onBrowseFolder: () => void;
-}) {
+function EmptyPrompt({ onBrowse }: { onBrowse: () => void }) {
   return (
     <div className="text-center flex flex-col items-center gap-2">
       <p className="text-xs" style={{ color: "rgb(var(--rift-muted) / 0.65)" }}>
-        Drop files anywhere — or{" "}
+        Drop files or folders anywhere — or{" "}
         <AccentButton onClick={onBrowse}>browse</AccentButton>
-        {" · "}
-        <AccentButton onClick={onBrowseFolder}>folder</AccentButton>
       </p>
       <p
         className="text-[10px] font-mono tracking-wide"
         style={{ color: "rgb(var(--rift-muted) / 0.35)" }}
       >
-        Any type · Any size · Folders included
+        Any type · Any size · Drag folders to include their contents
       </p>
     </div>
   );
@@ -283,10 +173,9 @@ function StageReadout({
     <div
       className="rounded-2xl p-4 w-full max-w-xs animate-slide-up"
       style={{
-        background: "rgb(var(--rift-surface2) / 0.5)",
+        background:     "rgb(var(--rift-surface2) / 0.5)",
         backdropFilter: "blur(20px)",
-        boxShadow:
-          "0 2px 12px rgb(0 0 0 / 0.25), 0 0 0 1px rgb(255 255 255 / 0.04), inset 0 1px 0 rgb(255 255 255 / 0.05)",
+        boxShadow:      "0 2px 12px rgb(0 0 0 / 0.25), 0 0 0 1px rgb(255 255 255 / 0.04), inset 0 1px 0 rgb(255 255 255 / 0.05)",
       }}
     >
       <div className="flex items-center justify-between mb-2">
@@ -302,15 +191,14 @@ function StageReadout({
           onClick={onClear}
           className="text-[10px] font-mono px-2.5 py-1 rounded-full transition-all"
           style={{
-            color: "rgb(var(--rift-error) / 0.75)",
+            color:      "rgb(var(--rift-error) / 0.75)",
             background: "rgb(var(--rift-error) / 0.08)",
-            boxShadow: "0 0 0 1px rgb(var(--rift-error) / 0.15)",
+            boxShadow:  "0 0 0 1px rgb(var(--rift-error) / 0.15)",
           }}
         >
           CLEAR
         </button>
       </div>
-
       <div className="max-h-20 overflow-y-auto">
         {files.map((f, i) => (
           <p
@@ -326,13 +214,7 @@ function StageReadout({
   );
 }
 
-function AccentButton({
-  onClick,
-  children,
-}: {
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
+function AccentButton({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
   return (
     <button
       onClick={onClick}
@@ -358,12 +240,12 @@ function StickyNoteButton({ onClick }: { onClick: () => void }) {
       title="Send text"
       className="flex items-center justify-center rounded-2xl transition-all duration-200"
       style={{
-        width: "44px",
-        height: "44px",
-        background: "rgb(var(--rift-surface2) / 0.55)",
-        boxShadow: "0 0 0 1px rgb(255 255 255 / 0.06), 0 2px 8px rgb(0 0 0 / 0.25)",
+        width:          "44px",
+        height:         "44px",
+        background:     "rgb(var(--rift-surface2) / 0.55)",
+        boxShadow:      "0 0 0 1px rgb(255 255 255 / 0.06), 0 2px 8px rgb(0 0 0 / 0.25)",
         backdropFilter: "blur(12px)",
-        flexShrink: 0,
+        flexShrink:     0,
       }}
       onMouseEnter={(e) => {
         (e.currentTarget as HTMLButtonElement).style.boxShadow =
