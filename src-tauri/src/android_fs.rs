@@ -48,11 +48,6 @@ use std::sync::OnceLock;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-pub struct FileInfo {
-    pub name: String,
-    pub size: u64,
-}
-
 pub struct ResolvedFile {
     /// Display name to use as the file name on the receiving device.
     pub name: String,
@@ -138,27 +133,6 @@ pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_native
             );
         }
     }
-}
-
-// ── get_file_info (sync) ──────────────────────────────────────────────────────
-
-/// Returns the display name and byte size for `path`.
-/// On Android, `path` may be a `content://` URI; uses ContentResolver.query.
-/// On all other platforms, uses `std::path` and `std::fs::metadata`.
-pub fn get_file_info(path: &str) -> FileInfo {
-    #[cfg(target_os = "android")]
-    if path.starts_with("content://") {
-        return android_query_uri_info(path);
-    }
-
-    let p = std::path::Path::new(path);
-    let name = p
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    FileInfo { name, size }
 }
 
 // ── resolve_paths (async) ─────────────────────────────────────────────────────
@@ -298,27 +272,6 @@ fn call_kotlin_string_method(uri: &str, method: &str) -> anyhow::Result<String> 
 
         Ok(rust_str)
     })
-}
-
-/// Calls `RiftAndroidHelper.queryUriInfo` and parses the "name|size" response.
-#[cfg(target_os = "android")]
-fn android_query_uri_info(uri: &str) -> FileInfo {
-    match call_kotlin_string_method(uri, "queryUriInfo") {
-        Ok(s) => {
-            let mut parts = s.splitn(2, '|');
-            let name = parts.next().unwrap_or("unknown");
-            let name = if name.is_empty() { "unknown" } else { name }.to_string();
-            let size = parts.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-            FileInfo { name, size }
-        }
-        Err(e) => {
-            eprintln!("[AndroidFS] queryUriInfo JNI error: {e}");
-            FileInfo {
-                name: "unknown".to_string(),
-                size: 0,
-            }
-        }
-    }
 }
 
 /// Copies a `content://` URI to the cache directory via JNI and builds a

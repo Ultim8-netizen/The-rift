@@ -52,5 +52,5 @@ jni = { version = "0.21", default-features = false }
 panic = "abort"
 codegen-units = 1
 lto = true
-opt-level = "3"   # was "s" — restores BLAKE3 SIMD paths; critical for per-chunk hashing speed
+opt-level = 3   # was "s" — restores BLAKE3 SIMD paths; critical for per-chunk hashing speed
 strip = true

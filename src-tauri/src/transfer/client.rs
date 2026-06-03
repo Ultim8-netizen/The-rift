@@ -427,7 +427,7 @@ async fn stream_worker_inner(
 
     // TcpSocket lets us size SO_SNDBUF before connecting.  8 MiB gives the kernel
     // room to buffer a full pipeline burst without blocking the Tokio task.
-    let socket = tokio::net::TcpSocket::new_v4()
+    let socket = TcpSocket::new_v4()
         .map_err(|e| anyhow::anyhow!("TcpSocket::new_v4: {e}"))?;
     socket.set_send_buffer_size(SOCKET_SEND_BUF)?;
 
@@ -537,7 +537,7 @@ async fn stream_worker_inner(
                 ))?;
 
             // Compute hash from the actual bytes read — the manifest stub is
-            // always empty (see manifest.rs).  opt-level = "3" keeps this fast
+            // always empty (see manifest.rs).  opt-level = 3 keeps this fast
             // via BLAKE3's SIMD paths (AVX2 / NEON).
             let chunk_blake3 = hex::encode(blake3::hash(data).as_bytes());
 

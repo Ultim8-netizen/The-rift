@@ -170,6 +170,11 @@ async fn send_files(
     //      path).  resolve_paths treats them as plain files (temp_path = None),
     //      but they are identifiable by the "rift_send_" filename prefix that
     //      android_copy_uri always uses.
+    //
+    // On non-Android builds the cfg block below is never compiled, so `mut` is
+    // not exercised. The allow attribute suppresses the resulting lint without
+    // changing behaviour on any platform.
+    #[allow(unused_mut)]
     let mut temp_paths: Vec<Option<String>> = resolved.iter().map(|r| r.temp_path.clone()).collect();
 
     #[cfg(target_os = "android")]
