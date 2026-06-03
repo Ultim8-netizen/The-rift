@@ -16,14 +16,10 @@ import java.io.IOException
  *   1. `init()` is called from `MainActivity.onCreate()` after `super.onCreate()`.
  *   2. `init()` stores `appContext` and then calls `nativeInitJvm()`.
  *   3. `nativeInitJvm()` (implemented in android_fs.rs) stores the `JavaVM`
- *      pointer in a Rust `OnceLock` that all Tokio blocking threads can access.
- *
- * Why `nativeInitJvm()` instead of `ndk_context`:
- *   The `ndk_context` crate stores its JVM pointer in statics that are private
- *   to a given .so linkage unit. Tauri initialises its own copy, but our
- *   cdylib has a separate copy that is never seeded, causing a fatal SIGABRT
- *   ("android context was not initialized") the first time a file is selected.
- *   Calling `nativeInitJvm()` from the Java side seeds our copy directly.
+ *      pointer AND a `GlobalRef` to this class in Rust `OnceLock`s.
+ *      The GlobalRef is what allows Tokio worker threads to call static methods
+ *      without hitting Android's bootstrap-classloader trap (FindClass failing
+ *      on non-Java threads because no app classloader is on the stack).
  *
  * Thread safety: `init()` is called once on the main thread. The @JvmStatic
  * methods are called from spawn_blocking threads (Tokio blocking pool) — both
@@ -43,30 +39,26 @@ object RiftAndroidHelper {
      * Implemented in android_fs.rs as
      * `Java_com_abyssprotocol_therift_RiftAndroidHelper_nativeInitJvm`.
      *
-     * Stores the current JNIEnv's JavaVM pointer in a Rust OnceLock so that
-     * Tokio blocking threads can attach to the JVM when performing file
-     * operations. Must be called after the native library has been loaded
-     * (i.e. after `TauriActivity.super.onCreate()` returns).
+     * Stores the current JNIEnv's JavaVM pointer AND caches a GlobalRef to
+     * the RiftAndroidHelper class in Rust OnceLocks. Both must be set on
+     * the main thread (here) where the app classloader is active.
+     *
+     * The GlobalRef fix: FindClass called from Tokio blocking threads uses the
+     * bootstrap classloader, which cannot find app classes. By caching the
+     * class as a GlobalRef here on the main thread, worker threads call
+     * JClass::from_raw(cached_ref) instead, bypassing FindClass entirely.
      */
     @JvmStatic
     private external fun nativeInitJvm()
 
     // ── Public API ────────────────────────────────────────────────────────────
 
-    /**
-     * Initialises this singleton. Must be called from `MainActivity.onCreate()`
-     * immediately after `super.onCreate(savedInstanceState)` returns.
-     *
-     * The call to `nativeInitJvm()` is wrapped in a try-catch so that a
-     * missing native symbol (e.g. during a stripped release build with
-     * mis-configured ProGuard) produces a log warning rather than a crash.
-     */
     @JvmStatic
     fun init(ctx: Context) {
         appContext = ctx.applicationContext
         try {
             nativeInitJvm()
-            Log.i(TAG, "JVM initialised for native file operations")
+            Log.i(TAG, "JVM and class GlobalRef initialised for native file operations")
         } catch (e: UnsatisfiedLinkError) {
             Log.e(TAG, "nativeInitJvm: native library not loaded — ${e.message}")
         }
@@ -82,15 +74,6 @@ object RiftAndroidHelper {
      * Also persists the URI read grant via takePersistableUriPermission so that
      * copyUriToCache() can still open the URI after the originating file-picker
      * Intent has been destroyed.
-     *
-     * Background: ACTION_OPEN_DOCUMENT results carry FLAG_GRANT_READ_URI_PERMISSION
-     * but the grant is session-scoped by default. Without persisting it, a call to
-     * openInputStream() on the same URI seconds later (when the user taps Send)
-     * raises SecurityException. takePersistableUriPermission() upgrades the grant
-     * to persist across Intent destruction. This only works for URIs whose document
-     * provider advertised FLAG_GRANT_PERSISTABLE_URI_PERMISSION; for those that
-     * don't (e.g. some cloud providers, OEM gallery URIs), we silently continue —
-     * copyUriToCache() will log its own error if access fails.
      *
      * Called from android_fs::call_kotlin_string_method (blocking thread).
      */
@@ -143,7 +126,14 @@ object RiftAndroidHelper {
 
     /**
      * Copies a content:// URI to the app's internal cache directory and returns
-     * the absolute path of the cache file. Returns "" on any failure.
+     * "absolutePath|fileSizeBytes" on success, or "" on failure.
+     *
+     * The size is taken from `cacheFile.length()` AFTER the copy completes,
+     * giving Rust the accurate byte count without a separate metadata call.
+     * This is important because `OpenableColumns.SIZE` is frequently null or 0
+     * for Documents Provider URIs (e.g. content://com.android.providers.media
+     * .documents/document/video%3A...), so the ContentResolver column cannot
+     * be relied upon for size.
      *
      * Rust cannot open content:// URIs directly (no kernel-level support for
      * ContentResolver). This copy gives the transfer layer a real file path.
@@ -192,9 +182,16 @@ object RiftAndroidHelper {
                 }
             }
 
+            // Read size from the actual cache file after copy — this is the
+            // authoritative byte count that Rust uses for staging and the
+            // transfer manifest.  ContentResolver's SIZE column is unreliable
+            // for Documents Provider URIs and is intentionally not used here.
+            val fileSize = cacheFile.length()
             Log.i(TAG,
-                "Copied $uriString → ${cacheFile.absolutePath} (${cacheFile.length()} B)")
-            cacheFile.absolutePath
+                "Copied $uriString → ${cacheFile.absolutePath} ($fileSize B)")
+
+            // Return "path|size" so Rust can parse both in one JNI call.
+            "${cacheFile.absolutePath}|$fileSize"
         } catch (e: Exception) {
             Log.e(TAG, "copyUriToCache failed for $uriString: ${e.message}")
             ""
