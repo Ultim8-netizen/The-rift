@@ -61,7 +61,7 @@ export function MobileSendPanel() {
 
   return (
     <div style={{ width: "100vw", height: "100%", overflowY: "auto", overflowX: "hidden" }}>
-      {/* Portal3D hero */}
+      {/* Portal3D hero — isMobile=true constrains all particle effects to canvas */}
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 8 }}>
         <p
           className="text-[8px] font-mono uppercase tracking-[0.32em] mb-1"
@@ -69,7 +69,12 @@ export function MobileSendPanel() {
         >
           Transfer
         </p>
-        <Portal3D dragging={false} hasFiles={stagedFiles.length > 0} isSending={isSending} />
+        <Portal3D
+          dragging={false}
+          hasFiles={stagedFiles.length > 0}
+          isSending={isSending}
+          isMobile={true}
+        />
       </div>
 
       <div className="px-4 flex flex-col gap-4 pb-10">

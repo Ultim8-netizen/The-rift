@@ -10,10 +10,12 @@ import { MobileSendPanel } from "./mobile/MobileSendPanel";
 import { MobileTransfersPanel } from "./mobile/MobileTransfersPanel";
 import { TAB_ORDER, type Tab } from "@/utils/tabTypes";
 import { MobileTabBar } from "./mobile/MobileTabBar";
+import { ContactPanel } from "./ContactPanel";
 
 export function MobileLayout() {
-  const [tab,       setTab]       = useState<Tab>("send");
-  const [themeOpen, setThemeOpen] = useState(false);
+  const [tab,          setTab]          = useState<Tab>("send");
+  const [themeOpen,    setThemeOpen]    = useState(false);
+  const [contactOpen,  setContactOpen]  = useState(false);
 
   const tabIndex    = TAB_ORDER.indexOf(tab);
   const touchStartX = useRef(0);
@@ -80,11 +82,15 @@ export function MobileLayout() {
         }}
       >
         <div>
+          {/* ── "The Rift" — cursive, bold, italic, gradient ── */}
           <h1
-            className="font-black font-mono leading-none"
             style={{
-              fontSize:             "1.9rem",
-              letterSpacing:        "-0.04em",
+              fontFamily:           "'Segoe Script', 'Apple Chancery', 'Brush Script MT', cursive",
+              fontWeight:           700,
+              fontStyle:            "italic",
+              fontSize:             "2rem",
+              lineHeight:           1,
+              letterSpacing:        "0.02em",
               background:           "linear-gradient(118deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)))",
               WebkitBackgroundClip: "text",
               WebkitTextFillColor:  "transparent",
@@ -92,7 +98,7 @@ export function MobileLayout() {
               filter:               "drop-shadow(0 0 18px rgb(var(--rift-glow) / 0.45))",
             }}
           >
-            THE RIFT
+            The Rift
           </h1>
           <div className="flex items-center gap-2 mt-1">
             <span
@@ -132,6 +138,26 @@ export function MobileLayout() {
               → {selectedDevice.name}
             </span>
           )}
+
+          {/* Contact button */}
+          <button
+            onClick={() => setContactOpen(true)}
+            title="Contact us"
+            className="w-9 h-9 flex items-center justify-center rounded-2xl transition-all"
+            style={{
+              background: "rgb(var(--rift-surface2) / 0.65)",
+              boxShadow:  "0 0 0 1px rgb(255 255 255 / 0.07), 0 2px 10px rgb(0 0 0 / 0.28)",
+              color:      "rgb(var(--rift-muted) / 0.65)",
+            }}
+          >
+            {/* Envelope icon */}
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="1" y="3" width="14" height="10" rx="2"/>
+              <path d="M1 5l7 5 7-5"/>
+            </svg>
+          </button>
+
+          {/* Theme button */}
           <button
             onClick={() => setThemeOpen(true)}
             className="w-9 h-9 flex items-center justify-center rounded-2xl transition-all"
@@ -202,7 +228,8 @@ export function MobileLayout() {
       <AcceptDialog />
       <IncomingTextDialog />
       <DevicePopup />
-      {themeOpen && <MobileThemePicker onClose={() => setThemeOpen(false)} />}
+      {themeOpen  && <MobileThemePicker onClose={() => setThemeOpen(false)} />}
+      {contactOpen && <ContactPanel onClose={() => setContactOpen(false)} />}
     </div>
   );
 }

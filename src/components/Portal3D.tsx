@@ -8,7 +8,7 @@ import { useEffect, useRef } from "react";
 const W  = 260, H = 260, CX = W / 2, CY = H / 2, SR = 58;
 const ND = 72;
 const NP = 72;
-const PK = 2.6; // ↓ from 3.8 — gentler scatter-return force
+const PK = 2.6;
 
 // ─── types ────────────────────────────────────────────────────────────────────
 type RGB = readonly [number, number, number];
@@ -28,8 +28,6 @@ function rz(v: V3, a: number): V3 {
   return [v[0]*c - v[1]*s, v[0]*s + v[1]*c, v[2]];
 }
 
-// Power-curve depth: back particles approach 0 alpha, front = 1.
-// This makes the 3D revolution obvious rather than "all particles equally bright".
 function depthAlpha(z: number, r: number): number {
   const t = Math.max(0, Math.min(1, (z / r) * 0.5 + 0.5));
   return 0.04 + 0.96 * Math.pow(t, 1.6);
@@ -46,14 +44,6 @@ interface Ring {
   speed: number; rgb: RGB;
 }
 
-// ┌──────────────────────────────────────────────────────────────────────────┐
-// │  Three rings:                                                            │
-// │  • Equatorial halo  — gently tilted so it reads as a clear ellipse,    │
-// │                       not a 2-D circle                                  │
-// │  • X arm ①  — steep tiltX (~vertical), tiltZ +0.52 → upper-right arc  │
-// │  • X arm ②  — mirror tiltZ  –0.52, opposite speed → lower-left arc    │
-// │    Together ① and ② form an × when viewed straight-on.                │
-// └──────────────────────────────────────────────────────────────────────────┘
 const RINGS: Ring[] = [
   { radius: 112, tiltX: 0.42, tiltY: 0.08, tiltZ:  0.00, speed:  0.42, rgb: [0,   200, 255] },
   { radius:  92, tiltX: 1.38, tiltY: 0.15, tiltZ:  0.52, speed:  0.36, rgb: [140,  80, 255] },
@@ -275,10 +265,6 @@ function drawSphere(
   ctx.restore();
 }
 
-// ─── Tentacle ─────────────────────────────────────────────────────────────────
-// Three rendering passes (outer glow, iridescent shimmer, bright core).
-// Control points oscillate at two different frequencies → rubber-rope wiggle.
-// Colour cycles between acc and accent-purple in sync with the wiggle.
 function drawTentacle(
   oc:      CanvasRenderingContext2D,
   ox: number, oy: number,
@@ -294,20 +280,16 @@ function drawTentacle(
   if (d < 4) return;
   const nx = -dy / d, ny = dx / d;
 
-  // Width tapers as you stretch further — rubber thins under tension
   const w = Math.max(2, SR * 0.40 * (1 - stretch * 0.72));
 
-  // Two-frequency wiggle → organic, non-repeating rubber motion
   const a1 = stretch * 30 * Math.sin(t * 9.2);
   const a2 = stretch * 22 * Math.sin(t * 5.7 + 1.8);
 
-  // Main bezier spine
   const c1x = ox + dx * 0.22 + nx * a1;
   const c1y = oy + dy * 0.22 + ny * a1;
   const c2x = ox + dx * 0.70 - nx * a2;
   const c2y = oy + dy * 0.70 - ny * a2;
 
-  // Slightly offset second spine for iridescent layer
   const a1b = stretch * 24 * Math.sin(t * 9.2 + 0.5);
   const a2b = stretch * 18 * Math.sin(t * 5.7 + 2.3);
   const c1bx = ox + dx * 0.22 + nx * a1b;
@@ -315,14 +297,12 @@ function drawTentacle(
   const c2bx = ox + dx * 0.70 - nx * a2b;
   const c2by = oy + dy * 0.70 - ny * a2b;
 
-  // Main colour pulse: acc → purple
   const pulse  = (Math.sin(t * 5.8)       + 1) * 0.5;
   const pulse2 = (Math.sin(t * 3.4 + 0.9) + 1) * 0.5;
   const cr = (r1 + (140 - r1) * stretch * pulse)  | 0;
   const cg = (g1 + ( 80 - g1) * stretch * pulse)  | 0;
   const cb = (b1 + (255 - b1) * stretch * pulse)  | 0;
 
-  // Iridescent shimmer colour: acc → warm cyan-white
   const ir = (r1 + (160 - r1) * stretch * pulse2 * 0.8) | 0;
   const ig = (g1 + (240 - g1) * stretch * pulse2 * 0.5) | 0;
   const ib = (b1 + (255 - b1) * stretch * pulse2 * 0.9) | 0;
@@ -332,7 +312,6 @@ function drawTentacle(
   oc.save();
   oc.lineCap = "round";
 
-  // ── Pass 1: wide outer glow — main shifting colour ────────────────────────
   oc.shadowColor = `rgba(${cr},${cg},${cb},0.95)`;
   oc.shadowBlur  = 28 + stretch * 20;
   oc.strokeStyle = `rgba(${cr},${cg},${cb},${alpha})`;
@@ -342,7 +321,6 @@ function drawTentacle(
   oc.bezierCurveTo(c1x, c1y, c2x, c2y, mx, my);
   oc.stroke();
 
-  // ── Pass 2: iridescent shimmer — slightly different spine + colour ────────
   oc.shadowColor = `rgba(${ir},${ig},${ib},0.75)`;
   oc.shadowBlur  = 14;
   oc.strokeStyle = `rgba(${ir},${ig},${ib},${alpha * 0.65})`;
@@ -352,7 +330,6 @@ function drawTentacle(
   oc.bezierCurveTo(c1bx, c1by, c2bx, c2by, mx, my);
   oc.stroke();
 
-  // ── Pass 3: bright white core — thin, crisp centre line ──────────────────
   oc.shadowBlur  = 5;
   oc.shadowColor = "rgba(255,255,255,0.9)";
   oc.strokeStyle = `rgba(255,255,255,${0.28 + stretch * 0.50})`;
@@ -409,13 +386,19 @@ function drawLabel(ctx: CanvasRenderingContext2D, state: string, acc: RGB): void
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
-export interface Portal3DProps { dragging: boolean; hasFiles: boolean; isSending: boolean; }
+export interface Portal3DProps {
+  dragging:  boolean;
+  hasFiles:  boolean;
+  isSending: boolean;
+  isMobile?: boolean;
+}
 
-export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
+export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DProps) {
   const canvasRef  = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const frameRef   = useRef<number | null>(null);
   const t0Ref      = useRef(0);
+  // isMobile is intentionally absent — mob is read from the effect closure, not reactively.
   const propsRef   = useRef({ dragging, hasFiles, isSending });
 
   const meshRef      = useRef<MeshPt[]>(makeMesh());
@@ -424,9 +407,10 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
   const sdimRef      = useRef({ w: window.innerWidth, h: window.innerHeight });
   const accentRef    = useRef<RGB>([0, 200, 255]);
 
-  const hoverRef = useRef<{ cx: number; cy: number } | null>(null);
-  const dragRef  = useRef({ active: false, cx: 0, cy: 0, sx: 0, sy: 0, stretch: 0 });
-  const cleanupDragRef = useRef<(() => void) | null>(null);
+  const hoverRef        = useRef<{ cx: number; cy: number } | null>(null);
+  const dragRef         = useRef({ active: false, cx: 0, cy: 0, sx: 0, sy: 0, stretch: 0 });
+  const cleanupDragRef  = useRef<(() => void) | null>(null);
+  const cleanupTouchRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     propsRef.current = { dragging, hasFiles, isSending };
@@ -434,6 +418,9 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
 
   useEffect(() => {
     t0Ref.current = performance.now();
+
+    // Locked at mount — component remounts on layout switch, so this never goes stale.
+    const mob = isMobile ?? false;
 
     const canvasMaybe  = canvasRef.current;
     const overlayMaybe = overlayRef.current;
@@ -504,21 +491,29 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
       // ── Update scattered particles ─────────────────────────────────────────
       for (const p of ps) {
         if (!p.scattered) continue;
-        p.vy  += 55 * dt;
+
+        p.vy  += (mob ? 28 : 55) * dt;
         p.vx  *= 0.992; p.vy *= 0.992;
         p.sx  += p.vx * dt; p.sy += p.vy * dt;
         p.age += dt;
 
-        if (p.sx < -40)   p.vx =  Math.abs(p.vx) * 0.35;
-        if (p.sx > SW+40) p.vx = -Math.abs(p.vx) * 0.35;
-        if (p.sy < -40)   p.vy =  Math.abs(p.vy) * 0.35;
-        if (p.sy > SH+40) p.vy = -Math.abs(p.vy) * 0.35;
+        if (mob) {
+          // Hard bounce within canvas bounds — particles never leave the 260×260 frame
+          if (p.sx < 0)   { p.vx =  Math.abs(p.vx) * 0.5; p.sx = 0;  }
+          if (p.sx > W)   { p.vx = -Math.abs(p.vx) * 0.5; p.sx = W;  }
+          if (p.sy < 0)   { p.vy =  Math.abs(p.vy) * 0.5; p.sy = 0;  }
+          if (p.sy > H)   { p.vy = -Math.abs(p.vy) * 0.5; p.sy = H;  }
+        } else {
+          if (p.sx < -40)   p.vx =  Math.abs(p.vx) * 0.35;
+          if (p.sx > SW+40) p.vx = -Math.abs(p.vx) * 0.35;
+          if (p.sy < -40)   p.vy =  Math.abs(p.vy) * 0.35;
+          if (p.sy > SH+40) p.vy = -Math.abs(p.vy) * 0.35;
+        }
 
-        // ── Slow return: wait 2.8 s before homing; gentle spring ────────────
         if (p.age > 2.8) {
           const p3  = ringPos3D(p.ring, p.phase, t);
-          const hsx = p3[0] + CX + rect.left;
-          const hsy = p3[1] + CY + rect.top;
+          const hsx = mob ? p3[0] + CX        : p3[0] + CX + rect.left;
+          const hsy = mob ? p3[1] + CY        : p3[1] + CY + rect.top;
           const ddx = hsx - p.sx, ddy = hsy - p.sy;
           const rK  = Math.min(PK * (p.age - 2.8) * 0.85, 7);
           p.vx     += ddx * rK * dt * 60;
@@ -533,14 +528,12 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
       // ── Main canvas ────────────────────────────────────────────────────────
       ctx.clearRect(0, 0, W, H);
 
-      // Ambient glow
       const ambAlpha = d ? 0.22 : f ? 0.12 : 0.07;
       const amb = ctx.createRadialGradient(CX, CY, SR*0.4, CX, CY, W*0.68);
       amb.addColorStop(0, `rgba(${ar},${ag},${ab},${ambAlpha})`);
       amb.addColorStop(1, `rgba(${ar},${ag},${ab},0)`);
       ctx.fillStyle = amb; ctx.fillRect(0, 0, W, H);
 
-      // Lighting vectors
       const lz  = 0.6;
       const lnx = hover ? (hover.cx - CX)/W : -0.4;
       const lny = hover ? (hover.cy - CY)/H : -0.6;
@@ -553,15 +546,13 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
       const hl  = Math.sqrt(hx*hx + hy*hy + hz*hz);
       const hxn = hx/hl, hyn = hy/hl;
 
-      // ── PAINTER'S PASS 1: ring particles that sit BEHIND the sphere ────────
-      // Drawn before drawSphere so the sphere canvas-fill naturally covers them
-      // when they pass through the silhouette — giving true 3-D revolution.
+      // ── PAINTER'S PASS 1: ring particles BEHIND sphere ────────────────────
       for (const p of ps) {
         if (p.scattered) continue;
         const p3 = ringPos3D(p.ring, p.phase, t);
-        if (p3[2] >= 0) continue;                                  // skip front half
+        if (p3[2] >= 0) continue;
         const R  = meshRadiusAt(mesh, Math.atan2(p3[1], p3[0]));
-        if (isOccluded(p3, R)) continue;                           // behind silhouette
+        if (isOccluded(p3, R)) continue;
         const a  = depthAlpha(p3[2], p.ring.radius);
         if (a < 0.01) continue;
         const [pr, pg, pb] = p.ring.rgb;
@@ -574,14 +565,14 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
         ctx.restore();
       }
 
-      // ── PAINTER'S PASS 2: sphere itself ───────────────────────────────────
+      // ── PAINTER'S PASS 2: sphere ──────────────────────────────────────────
       drawSphere(ctx, mesh, acc, lxn, lynN, lzn, hxn, hyn);
 
-      // ── PAINTER'S PASS 3: ring particles that sit IN FRONT of the sphere ──
+      // ── PAINTER'S PASS 3: ring particles IN FRONT of sphere ───────────────
       for (const p of ps) {
         if (p.scattered) continue;
         const p3 = ringPos3D(p.ring, p.phase, t);
-        if (p3[2] < 0) continue;                                   // skip back half
+        if (p3[2] < 0) continue;
         const R  = meshRadiusAt(mesh, Math.atan2(p3[1], p3[0]));
         if (isOccluded(p3, R)) continue;
         const a  = depthAlpha(p3[2], p.ring.radius);
@@ -595,91 +586,128 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
         ctx.restore();
       }
 
-      // Non-screen shockwave rings
+      // Canvas-local shockwave rings — both platforms
       for (const wv of waves) if (!wv.screen) drawWave(ctx, wv);
+
+      // ── Mobile: scattered particles + tentacle stay on main canvas ─────────
+      if (mob) {
+        for (const p of ps) {
+          if (!p.scattered) continue;
+          const [pr, pg, pb] = p.ring.rgb;
+          const age   = Math.min(p.age, 3) / 3;
+          const alpha = Math.max(0.1, 1 - age * 0.55);
+          ctx.save();
+          ctx.shadowColor = `rgba(${pr},${pg},${pb},${alpha})`;
+          ctx.shadowBlur  = p.size * 4.5;
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle   = `rgb(${pr},${pg},${pb})`;
+          ctx.beginPath(); ctx.arc(p.sx, p.sy, p.size*(1 + age*0.7), 0, Math.PI*2); ctx.fill();
+          ctx.restore();
+        }
+
+        if (drag.active && drag.stretch > 0.02) {
+          const tip = meshTip(mesh, drag.cx, drag.cy);
+          drawTentacle(ctx, tip.x, tip.y, drag.cx, drag.cy, acc, drag.stretch, t);
+        }
+      }
 
       drawLabel(ctx, state, acc);
 
-      // ── Overlay canvas ─────────────────────────────────────────────────────
+      // ── Overlay canvas (desktop only) ──────────────────────────────────────
       oc.clearRect(0, 0, SW, SH);
 
-      // Scattered (launched) particles on the full-screen overlay
-      for (const p of ps) {
-        if (!p.scattered) continue;
-        const [pr, pg, pb] = p.ring.rgb;
-        const age   = Math.min(p.age, 3) / 3;
-        const alpha = Math.max(0.1, 1 - age*0.55);
-        oc.save();
-        oc.shadowColor = `rgba(${pr},${pg},${pb},${alpha})`;
-        oc.shadowBlur  = p.size * 4.5;
-        oc.globalAlpha = alpha;
-        oc.fillStyle   = `rgb(${pr},${pg},${pb})`;
-        oc.beginPath(); oc.arc(p.sx, p.sy, p.size*(1 + age*0.7), 0, Math.PI*2); oc.fill();
-        oc.restore();
-      }
+      if (!mob) {
+        // Scattered particles on full-screen overlay
+        for (const p of ps) {
+          if (!p.scattered) continue;
+          const [pr, pg, pb] = p.ring.rgb;
+          const age   = Math.min(p.age, 3) / 3;
+          const alpha = Math.max(0.1, 1 - age*0.55);
+          oc.save();
+          oc.shadowColor = `rgba(${pr},${pg},${pb},${alpha})`;
+          oc.shadowBlur  = p.size * 4.5;
+          oc.globalAlpha = alpha;
+          oc.fillStyle   = `rgb(${pr},${pg},${pb})`;
+          oc.beginPath(); oc.arc(p.sx, p.sy, p.size*(1 + age*0.7), 0, Math.PI*2); oc.fill();
+          oc.restore();
+        }
 
-      // Tentacle — now receives `t` for wiggle and colour-shift
-      if (drag.active && drag.stretch > 0.02) {
-        const tip = meshTip(mesh, drag.cx, drag.cy);
-        drawTentacle(
-          oc,
-          rect.left + tip.x, rect.top + tip.y,
-          drag.sx, drag.sy,
-          acc, drag.stretch, t,
-        );
-      }
+        if (drag.active && drag.stretch > 0.02) {
+          const tip = meshTip(mesh, drag.cx, drag.cy);
+          drawTentacle(oc, rect.left + tip.x, rect.top + tip.y, drag.sx, drag.sy, acc, drag.stretch, t);
+        }
 
-      // Screen-space shockwave rings
-      for (const wv of waves) if (wv.screen) drawWave(oc, wv);
+        // Screen-space shockwave rings
+        for (const wv of waves) if (wv.screen) drawWave(oc, wv);
+      }
 
       frameRef.current = requestAnimationFrame(draw);
     }
 
     frameRef.current = requestAnimationFrame(draw);
 
-    // ── Impact blast ───────────────────────────────────────────────────────
-    function launchImpact(stretch: number, ev: globalThis.MouseEvent) {
-      const rect      = canvasEl.getBoundingClientRect();
-      const acc       = accentRef.current;
-      const [r, g, b] = acc;
-      const csx = rect.left + CX, csy = rect.top + CY;
+    // ── Impact blast ──────────────────────────────────────────────────────────
+    // _releaseY is kept for call-site symmetry (mouseup + touchend both pass x,y)
+    // but vertical release position has no effect on trajectory in the current model.
+    function launchImpact(stretch: number, releaseX: number, _releaseY: number) {
+      const rect    = canvasEl.getBoundingClientRect();
+      const accNow  = accentRef.current;
+      const [r, g, b] = accNow;
 
-      const mesh = meshRef.current;
+      const meshNow = meshRef.current;
       for (let i = 0; i < ND; i++) {
-        mesh[i].vx += (Math.random() - 0.5) * stretch * 2600;
-        mesh[i].vy += (Math.random() - 0.5) * stretch * 2600;
+        meshNow[i].vx += (Math.random() - 0.5) * stretch * 2600;
+        meshNow[i].vy += (Math.random() - 0.5) * stretch * 2600;
       }
 
-      const waves = wavesRef.current;
+      const wavesNow = wavesRef.current;
+
+      // Canvas-local rings — both platforms
       for (let i = 0; i < 3; i++) {
         const ii = i;
         setTimeout(() => {
-          waves.push({ x: CX, y: CY, r: 0, maxR: SR*(2+stretch*3.5),
-            alpha: 0.75+stretch*0.2, rgb: acc, screen: false, spd: 0.16+ii*0.05+stretch*0.1 });
+          wavesNow.push({ x: CX, y: CY, r: 0, maxR: SR*(2+stretch*3.5),
+            alpha: 0.75+stretch*0.2, rgb: accNow, screen: false, spd: 0.16+ii*0.05+stretch*0.1 });
         }, i * 100);
       }
-      const wCount = 4 + Math.floor(stretch * 4);
-      for (let i = 0; i < wCount; i++) {
-        const ii = i;
-        setTimeout(() => {
-          waves.push({ x: csx, y: csy, r: 0,
-            maxR: Math.max(window.innerWidth, window.innerHeight) * (0.85+ii*0.18),
-            alpha: 0.65+stretch*0.28, rgb: acc, screen: true, spd: 0.13+ii*0.03+stretch*0.09 });
-        }, i * 85);
+
+      // Screen-space rings — desktop only
+      // wCsx/wCsy named distinctly to avoid shadowing the particle explosion center below.
+      if (!mob) {
+        const wCsx = rect.left + CX, wCsy = rect.top + CY;
+        const wCount = 4 + Math.floor(stretch * 4);
+        for (let i = 0; i < wCount; i++) {
+          const ii = i;
+          setTimeout(() => {
+            wavesNow.push({ x: wCsx, y: wCsy, r: 0,
+              maxR: Math.max(window.innerWidth, window.innerHeight) * (0.85+ii*0.18),
+              alpha: 0.65+stretch*0.28, rgb: accNow, screen: true, spd: 0.13+ii*0.03+stretch*0.09 });
+          }, i * 85);
+        }
       }
 
-      const ps = particlesRef.current;
-      const tt = (performance.now() - t0Ref.current) / 1000;
-      for (const p of ps) {
+      const psNow = particlesRef.current;
+      const tt    = (performance.now() - t0Ref.current) / 1000;
+      const csx   = mob ? CX            : rect.left + CX;
+      const csy   = mob ? CY            : rect.top  + CY;
+
+      for (const p of psNow) {
         const p3  = ringPos3D(p.ring, p.phase, tt);
-        const psx = p3[0] + CX + rect.left;
-        const psy = p3[1] + CY + rect.top;
+        const psx = mob ? p3[0] + CX : p3[0] + CX + rect.left;
+        const psy = mob ? p3[1] + CY : p3[1] + CY + rect.top;
         const dx  = psx - csx, dy = psy - csy;
         const dist = Math.sqrt(dx*dx + dy*dy) || 1;
-        const spd = stretch * (280 + Math.random() * 480);
+        const spd = mob
+          ? stretch * (48 + Math.random() * 65)
+          : stretch * (280 + Math.random() * 480);
         p.sx = psx; p.sy = psy;
-        p.vx = (dx/dist)*spd*(0.5+Math.random()*0.9) + (ev.clientX - window.innerWidth/2)*stretch*0.14;
-        p.vy = (dy/dist)*spd*(0.5+Math.random()*0.9) - stretch*90;
+        if (mob) {
+          p.vx = (dx/dist)*spd*(0.5+Math.random()*0.9);
+          p.vy = (dy/dist)*spd*(0.5+Math.random()*0.9) - stretch*18;
+        } else {
+          p.vx = (dx/dist)*spd*(0.5+Math.random()*0.9) + (releaseX - window.innerWidth/2)*stretch*0.14;
+          p.vy = (dy/dist)*spd*(0.5+Math.random()*0.9) - stretch*90;
+        }
         p.scattered = true; p.age = 0;
       }
 
@@ -696,7 +724,7 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
       });
     }
 
-    // ── Interaction listeners ──────────────────────────────────────────────
+    // ── Desktop mouse listeners ────────────────────────────────────────────
     function onMouseMoveCanvas(e: globalThis.MouseEvent) {
       const r = canvasEl.getBoundingClientRect();
       hoverRef.current = { cx: e.clientX - r.left, cy: e.clientY - r.top };
@@ -737,7 +765,7 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
         dragRef.current  = { active: false, cx: 0, cy: 0, sx: 0, sy: 0, stretch: 0 };
         hoverRef.current = null;
         canvasEl.style.cursor = "grab";
-        launchImpact(saved.stretch, ev);
+        launchImpact(saved.stretch, ev.clientX, ev.clientY);
       }
 
       window.addEventListener("mousemove", onMove);
@@ -745,29 +773,98 @@ export function Portal3D({ dragging, hasFiles, isSending }: Portal3DProps) {
       cleanupDragRef.current = () => window.removeEventListener("mousemove", onMove);
     }
 
-    canvasEl.addEventListener("mousemove",  onMouseMoveCanvas);
-    canvasEl.addEventListener("mouseleave", onMouseLeaveCanvas);
-    canvasEl.addEventListener("mousedown",  onMouseDownCanvas);
+    // ── Mobile touch listeners ─────────────────────────────────────────────
+    function onTouchStartCanvas(e: globalThis.TouchEvent) {
+      e.preventDefault();
+      const r     = canvasEl.getBoundingClientRect();
+      const touch = e.touches[0];
+      const cx    = touch.clientX - r.left;
+      const cy    = touch.clientY - r.top;
+      // Slightly more generous hit area on mobile — finger > cursor
+      if (Math.sqrt((cx-CX)**2 + (cy-CY)**2) > SR * 2.2) return;
+
+      dragRef.current  = { active: true, cx, cy, sx: touch.clientX, sy: touch.clientY, stretch: 0 };
+      hoverRef.current = { cx, cy };
+
+      function onTouchMove(ev: globalThis.TouchEvent) {
+        ev.preventDefault();
+        const cr  = canvasEl.getBoundingClientRect();
+        const tch = ev.touches[0];
+        const nx  = tch.clientX - cr.left;
+        const ny  = tch.clientY - cr.top;
+        const ddx = nx - CX, ddy = ny - CY;
+        const dist = Math.sqrt(ddx*ddx + ddy*ddy);
+        const maxD = Math.max(W, H) * 0.85;
+        dragRef.current.cx      = nx;
+        dragRef.current.cy      = ny;
+        dragRef.current.sx      = tch.clientX;
+        dragRef.current.sy      = tch.clientY;
+        dragRef.current.stretch = Math.min(1, dist / maxD);
+        hoverRef.current = { cx: nx, cy: ny };
+      }
+
+      function onTouchEnd(ev: globalThis.TouchEvent) {
+        cleanupTouchRef.current?.();
+        cleanupTouchRef.current = null;
+        const saved = { ...dragRef.current };
+        dragRef.current  = { active: false, cx: 0, cy: 0, sx: 0, sy: 0, stretch: 0 };
+        hoverRef.current = null;
+        const ch = ev.changedTouches[0];
+        launchImpact(saved.stretch, ch?.clientX ?? saved.sx, ch?.clientY ?? saved.sy);
+      }
+
+      document.addEventListener("touchmove", onTouchMove, { passive: false });
+      document.addEventListener("touchend",  onTouchEnd,  { once: true });
+      cleanupTouchRef.current = () => document.removeEventListener("touchmove", onTouchMove);
+    }
+
+    // Register event handlers by platform
+    if (mob) {
+      canvasEl.addEventListener("touchstart", onTouchStartCanvas, { passive: false });
+    } else {
+      canvasEl.addEventListener("mousemove",  onMouseMoveCanvas);
+      canvasEl.addEventListener("mouseleave", onMouseLeaveCanvas);
+      canvasEl.addEventListener("mousedown",  onMouseDownCanvas);
+    }
 
     return () => {
       if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
       window.removeEventListener("resize", resizeOL);
       cleanupDragRef.current?.();
-      canvasEl.removeEventListener("mousemove",  onMouseMoveCanvas);
-      canvasEl.removeEventListener("mouseleave", onMouseLeaveCanvas);
-      canvasEl.removeEventListener("mousedown",  onMouseDownCanvas);
+      cleanupTouchRef.current?.();
+      if (mob) {
+        canvasEl.removeEventListener("touchstart", onTouchStartCanvas);
+      } else {
+        canvasEl.removeEventListener("mousemove",  onMouseMoveCanvas);
+        canvasEl.removeEventListener("mouseleave", onMouseLeaveCanvas);
+        canvasEl.removeEventListener("mousedown",  onMouseDownCanvas);
+      }
     };
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <>
       <canvas
         ref={canvasRef}
-        style={{ display: "block", cursor: "grab", flexShrink: 0, position: "relative", zIndex: 2 }}
+        style={{
+          display:    "block",
+          cursor:     isMobile ? "default" : "grab",
+          flexShrink: 0,
+          position:   "relative",
+          zIndex:     2,
+        }}
       />
+      {/* Overlay: desktop uses it for full-screen particles, tentacle, and shockwaves.
+          Mobile keeps it in the DOM for the ref but sinks it below all content;
+          nothing is drawn on it in mobile mode. */}
       <canvas
         ref={overlayRef}
-        style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 9999 }}
+        style={{
+          position:      "fixed",
+          inset:         0,
+          pointerEvents: "none",
+          zIndex:        isMobile ? -1 : 9999,
+        }}
       />
     </>
   );

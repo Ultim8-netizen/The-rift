@@ -72,20 +72,24 @@ export function DropZone() {
       data-tour="drop-zone"
       className="flex-1 flex flex-col items-center justify-center gap-6 px-8 py-6 select-none overflow-hidden"
     >
-      {/* Wordmark */}
+      {/* ── Wordmark — cursive, bold, italic, gradient ── */}
       <div className="text-center">
         <h1
-          className="font-black tracking-[-0.04em] font-mono leading-none"
           style={{
-            fontSize: "clamp(2rem, 4vw, 3rem)",
-            background: "linear-gradient(125deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)))",
+            fontFamily:           "'Segoe Script', 'Apple Chancery', 'Brush Script MT', cursive",
+            fontWeight:           700,
+            fontStyle:            "italic",
+            fontSize:             "clamp(2.2rem, 4vw, 3.2rem)",
+            lineHeight:           1,
+            letterSpacing:        "0.02em",
+            background:           "linear-gradient(125deg, rgb(var(--rift-accent)), rgb(var(--rift-accent2)))",
             WebkitBackgroundClip: "text",
-            WebkitTextFillColor: "transparent",
-            backgroundClip: "text",
-            filter: "drop-shadow(0 0 24px rgb(var(--rift-glow) / 0.3))",
+            WebkitTextFillColor:  "transparent",
+            backgroundClip:       "text",
+            filter:               "drop-shadow(0 0 24px rgb(var(--rift-glow) / 0.3))",
           }}
         >
-          THE RIFT
+          The Rift
         </h1>
         <p
           className="text-[9px] font-mono tracking-[0.35em] uppercase mt-1"
