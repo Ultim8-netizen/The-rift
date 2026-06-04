@@ -8,11 +8,6 @@ import { ChunkProgress, IncomingRequest, IncomingTextPayload, Transfer } from "@
 // CRITICAL: must match DEFAULT_CHUNK_SIZE in src-tauri/src/transfer/manifest.rs.
 const CHUNK_SIZE = 2 * 1024 * 1024; // 2 MiB
 
-// CRITICAL: must match EMIT_EVERY_N_CHUNKS in src-tauri/src/transfer/client.rs.
-// chunk_sent fires once per this many confirmed chunks per worker, so the
-// tracker must advance by this many chunks per event — not by 1.
-const EMIT_EVERY_N_CHUNKS = 8;
-
 const EMA_ALPHA = 0.3;
 const MIN_SPEED_FOR_ETA = 2048; // 2 KB/s — suppress ETA at very low speeds
 
@@ -50,9 +45,7 @@ function computeExpectedChunks(files: { sizeBytes: number }[]): number {
  * Advance the chunk counter by `count` (default 1), compute bytes-transferred
  * proportion, update EMA speed.
  *
- * count = 1  : receiver path — transfer_progress fires once per chunk on disk.
- * count = EMIT_EVERY_N_CHUNKS : sender path — chunk_sent fires once per 8
- *   confirmed chunks, so each event represents 8 real chunks.
+ * Used ONLY by the receiver-side transfer_progress handler.
  */
 function advanceTracker(
   tracker:       ProgressTracker,
@@ -135,7 +128,6 @@ export function useTransferEvents() {
       trackers.current.set(transferId, tracker);
     }
 
-    // count = 1: one event = one chunk on disk (receiver)
     const { bytesTransferred, speedBytesPerSec, etaSeconds } = advanceTracker(
       tracker,
       transferTotal,
@@ -151,9 +143,11 @@ export function useTransferEvents() {
   });
 
   // ── chunk_sent (OUTGOING — sender side) ───────────────────────────────────
-  // Emitted by client.rs every EMIT_EVERY_N_CHUNKS (8) confirmed chunks per
-  // worker. Each event therefore represents 8 real chunks — advance by that
-  // many so the progress bar reflects actual throughput.
+  // Emitted every EMIT_EVERY_N_CHUNKS confirmed chunks per worker.
+  // We do NOT use this for bytesTransferred — the count is structurally
+  // unreliable (floor(chunks_per_worker / N) × N always undershoots total).
+  // Its only job here is to ensure the tracker exists and flip status to
+  // transferring immediately on the first chunk, before the first overseer tick.
   useTauriEvent<{
     transferId: string;
     fileIndex:  number;
@@ -164,43 +158,94 @@ export function useTransferEvents() {
     const stored = useRiftStore.getState().transfers.find((t) => t.id === transferId);
     if (!stored) return;
 
-    let tracker = trackers.current.get(transferId);
-    if (!tracker) {
-      tracker = makeTracker(computeExpectedChunks(stored.files), now);
-      trackers.current.set(transferId, tracker);
+    // Ensure the tracker exists so overseer_tick can use it for EMA speed.
+    if (!trackers.current.has(transferId)) {
+      trackers.current.set(
+        transferId,
+        makeTracker(computeExpectedChunks(stored.files), now),
+      );
     }
 
-    // count = EMIT_EVERY_N_CHUNKS: one event = 8 confirmed chunks (sender)
-    const { bytesTransferred, speedBytesPerSec, etaSeconds } = advanceTracker(
-      tracker,
-      stored.totalBytes,
-      now,
-      EMIT_EVERY_N_CHUNKS,
-    );
-
-    updateTransfer(transferId, {
-      bytesTransferred,
-      speedBytesPerSec,
-      etaSeconds,
-      status: "transferring",
-    });
+    // Flip status only — do not touch bytesTransferred.
+    if (stored.status === "queued" || stored.status === "connecting") {
+      updateTransfer(transferId, { status: "transferring" });
+    }
   });
 
-  // ── transfer_overseer_tick (OUTGOING — sender side) ───────────────────────
-  useTauriEvent<{ transferId: string }>(
+  // ── transfer_overseer_tick (OUTGOING — sender side, ground-truth progress) ─
+  //
+  // The overseer independently tracks every chunk dispatched and ACKed.
+  // confirmedChunks/totalChunks is the only accurate progress signal on the
+  // sender side — it matches what the receiver actually has on disk.
+  //
+  // For multi-file transfers, files are processed sequentially.  bytesTransferred
+  // = (bytes of already-verified files) + (confirmed fraction of current file).
+  useTauriEvent<{
+    transferId:      string;
+    fileIndex:       number;
+    confirmedChunks: number;
+    totalChunks:     number;
+    percentComplete: number;
+  }>(
     "transfer_overseer_tick",
-    ({ transferId }) => {
+    ({ transferId, fileIndex, confirmedChunks, totalChunks }) => {
+      const now = Date.now();
       const stored = useRiftStore
         .getState()
-        .transfers.find(
-          (t) =>
-            t.id === transferId &&
-            t.direction === "outgoing" &&
-            t.status === "queued",
-        );
-      if (stored) {
-        updateTransfer(transferId, { status: "transferring" });
+        .transfers.find((t) => t.id === transferId && t.direction === "outgoing");
+      if (!stored) return;
+
+      let tracker = trackers.current.get(transferId);
+      if (!tracker) {
+        tracker = makeTracker(computeExpectedChunks(stored.files), now);
+        trackers.current.set(transferId, tracker);
       }
+
+      // Bytes from files that the overseer has already fully verified.
+      const completedBytes = stored.files
+        .filter((_, i) => tracker!.verifiedFiles.has(i))
+        .reduce((sum, f) => sum + f.sizeBytes, 0);
+
+      // Confirmed fraction of the file currently being transferred.
+      const currentFile = stored.files[fileIndex];
+      const currentFileBytes =
+        currentFile && totalChunks > 0
+          ? Math.round((confirmedChunks / totalChunks) * currentFile.sizeBytes)
+          : 0;
+
+      const bytesTransferred = Math.min(
+        completedBytes + currentFileBytes,
+        stored.totalBytes,
+      );
+
+      // EMA speed derived from the delta since the last tick measurement.
+      // Using overseer-accurate bytes makes this more reliable than the old
+      // chunk_sent counter which systematically undershot.
+      const dtSeconds  = Math.max(0.1, (now - tracker.lastTime) / 1000);
+      const deltaBytes = Math.max(0, bytesTransferred - tracker.lastBytes);
+      if (deltaBytes > 0) {
+        const instant    = deltaBytes / dtSeconds;
+        tracker.speedEma =
+          tracker.speedEma === 0
+            ? instant
+            : EMA_ALPHA * instant + (1 - EMA_ALPHA) * tracker.speedEma;
+      }
+      tracker.lastTime  = now;
+      tracker.lastBytes = bytesTransferred;
+
+      const remaining  = stored.totalBytes - bytesTransferred;
+      const etaSeconds =
+        tracker.speedEma >= MIN_SPEED_FOR_ETA
+          ? Math.ceil(remaining / tracker.speedEma)
+          : null;
+
+      const updates: Partial<Transfer> = {
+        bytesTransferred,
+        speedBytesPerSec: Math.round(tracker.speedEma),
+        etaSeconds,
+      };
+      if (stored.status === "queued") updates.status = "transferring";
+      updateTransfer(transferId, updates);
     },
   );
 
