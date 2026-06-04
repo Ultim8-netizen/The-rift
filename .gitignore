@@ -63,3 +63,6 @@ icon-source.png
 
 #powershell
 *.ps1
+
+#text
+*.txt

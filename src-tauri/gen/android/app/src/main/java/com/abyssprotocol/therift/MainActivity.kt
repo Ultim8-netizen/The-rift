@@ -31,13 +31,23 @@ class MainActivity : TauriActivity() {
 
     /**
      * Called whenever the activity leaves the foreground (home press, back, screen off, etc.).
-     * We switch to a random icon here so that by the time the user glances at their launcher,
-     * the new icon is already applied.
      */
     override fun onStop() {
         super.onStop()
-        // Run on a background thread — setComponentEnabledSetting does IPC and must
-        // not block the main thread. applicationContext outlives the activity.
+        // REMOVED: IconSwitcher call was here.
+        // Calling setComponentEnabledSetting(current_alias, DISABLED) from onStop()
+        // disables the active launcher alias while the process is still live.
+        // On Transsion OEM (and likely others), this triggers MainActivity.onDestroy()
+        // even with DONT_KILL_APP, which Tauri interprets as app termination → exit(0).
+        // The file picker opened via startActivityForResult has no process to return to.
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // Safe here: the app is genuinely ending. setComponentEnabledSetting on the
+        // now-dead launcher alias cannot disrupt anything. The background thread may
+        // or may not complete before Tauri's exit(0) fires, but either outcome is
+        // acceptable since the process is already shutting down.
         Thread { IconSwitcher.switchRandom(applicationContext) }.start()
     }
 
