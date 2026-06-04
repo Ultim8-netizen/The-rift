@@ -124,7 +124,7 @@ class RiftService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("The Rift")
             .setContentText("Active — tap to return")
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_notification)  // ← bolt silhouette from drawable/
             .setContentIntent(tapPending)
             .setOngoing(true)           // cannot be swiped away
             .setShowWhen(false)
