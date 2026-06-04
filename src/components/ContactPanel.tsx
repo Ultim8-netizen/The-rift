@@ -6,9 +6,8 @@ const EMAIL       = "eldergod263@gmail.com";
 
 async function openExternal(url: string) {
   try {
-    // @ts-expect-error — @tauri-apps/plugin-opener is an optional runtime dep; falls back to window.open
     const mod = await import("@tauri-apps/plugin-opener").catch(() => null);
-    if (mod) { await mod.open(url); return; }
+if (mod) { await mod.openUrl(url); return; }
   } catch { /* fall through */ }
   window.open(url, "_blank", "noopener,noreferrer");
 }

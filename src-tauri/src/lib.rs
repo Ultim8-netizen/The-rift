@@ -475,6 +475,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(shared_state.clone())
         .invoke_handler(tauri::generate_handler![
             get_app_state,

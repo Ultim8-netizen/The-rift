@@ -8,6 +8,7 @@
     "dialog:allow-open",
     "fs:allow-read-file",
     "fs:allow-exists",
-    "fs:allow-read-dir"
+    "fs:allow-read-dir",
+    "opener:default"
   ]
 }
