@@ -7,54 +7,24 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-
-    <!-- mDNS multicast — without this, every discovery packet is silently dropped -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <!-- ── Power ─────────────────────────────────────────────────────────── -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- ── Foreground Service ────────────────────────────────────────────── -->
-    <!--
-        FOREGROUND_SERVICE became a hard requirement at API 28 (Android 9).
-        Declaring it unconditionally is correct and safe on all API levels:
-        it is silently ignored on API 24–27 and enforced from API 28+.
-    -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-
-    <!--
-        FOREGROUND_SERVICE_DATA_SYNC was introduced in API 34 (Android 14).
-        The minSdkVersion guard tells the package manager to only register
-        this permission on devices running API 34+. On API 24–33 the entry
-        is silently skipped — without the guard, some API 28–33 builds throw
-        a SecurityException at startForeground() because the system does not
-        recognise the permission string.
-    -->
     <uses-permission
         android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"
         android:minSdkVersion="34" />
 
     <!-- ── Notifications ─────────────────────────────────────────────────── -->
-    <!--
-        POST_NOTIFICATIONS is a runtime permission required from API 33
-        (Android 13). On API 24–32 it is ignored entirely. We request it
-        unconditionally here; MainActivity asks at runtime only when running
-        on API 33+.
-    -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- ── Storage ───────────────────────────────────────────────────────── -->
-    <!--
-        READ_EXTERNAL_STORAGE: needed on API 24–32 to read files for upload.
-        Scoped storage (MediaStore) replaces it from API 33+.
-    -->
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
-    <!--
-        WRITE_EXTERNAL_STORAGE: needed on API 24–28 to write received files
-        to Downloads. Scoped storage replaces it from API 29+.
-    -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
@@ -70,33 +40,182 @@
         android:usesCleartextTraffic="true"
         tools:targetApi="28">
 
+        <!--
+            MainActivity: launcher intent-filter removed.
+            Activity-alias entries below provide the LAUNCHER shortcut.
+            exported="true" kept for Tauri deep-link / IPC compatibility.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="The Rift"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:launchMode="singleTop"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize" />
+
+        <!-- ── Icon aliases ───────────────────────────────────────────────────
+             Exactly one alias is enabled at runtime.
+             V0 is the default (enabled="true"); all others start disabled.
+             IconSwitcher.kt manages toggling between them via PackageManager.
+             android:name must match the full class name used in IconSwitcher.ALIASES.
+        ─────────────────────────────────────────────────────────────────────── -->
+
+        <activity-alias
+            android:name=".MainActivityIconV0"
+            android:targetActivity=".MainActivity"
+            android:label="The Rift"
+            android:icon="@mipmap/ic_launcher_v0"
+            android:roundIcon="@mipmap/ic_launcher_v0"
+            android:exported="true"
+            android:enabled="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".MainActivityIconV1"
+            android:targetActivity=".MainActivity"
+            android:label="The Rift"
+            android:icon="@mipmap/ic_launcher_v1"
+            android:roundIcon="@mipmap/ic_launcher_v1"
+            android:exported="true"
+            android:enabled="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".MainActivityIconV2"
+            android:targetActivity=".MainActivity"
+            android:label="The Rift"
+            android:icon="@mipmap/ic_launcher_v2"
+            android:roundIcon="@mipmap/ic_launcher_v2"
+            android:exported="true"
+            android:enabled="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".MainActivityIconV3"
+            android:targetActivity=".MainActivity"
+            android:label="The Rift"
+            android:icon="@mipmap/ic_launcher_v3"
+            android:roundIcon="@mipmap/ic_launcher_v3"
+            android:exported="true"
+            android:enabled="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".MainActivityIconV4"
+            android:targetActivity=".MainActivity"
+            android:label="The Rift"
+            android:icon="@mipmap/ic_launcher_v4"
+            android:roundIcon="@mipmap/ic_launcher_v4"
+            android:exported="true"
+            android:enabled="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".MainActivityIconV5"
+            android:targetActivity=".MainActivity"
+            android:label="The Rift"
+            android:icon="@mipmap/ic_launcher_v5"
+            android:roundIcon="@mipmap/ic_launcher_v5"
+            android:exported="true"
+            android:enabled="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".MainActivityIconV6"
+            android:targetActivity=".MainActivity"
+            android:label="The Rift"
+            android:icon="@mipmap/ic_launcher_v6"
+            android:roundIcon="@mipmap/ic_launcher_v6"
+            android:exported="true"
+            android:enabled="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".MainActivityIconV7"
+            android:targetActivity=".MainActivity"
+            android:label="The Rift"
+            android:icon="@mipmap/ic_launcher_v7"
+            android:roundIcon="@mipmap/ic_launcher_v7"
+            android:exported="true"
+            android:enabled="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".MainActivityIconV8"
+            android:targetActivity=".MainActivity"
+            android:label="The Rift"
+            android:icon="@mipmap/ic_launcher_v8"
+            android:roundIcon="@mipmap/ic_launcher_v8"
+            android:exported="true"
+            android:enabled="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".MainActivityIconV9"
+            android:targetActivity=".MainActivity"
+            android:label="The Rift"
+            android:icon="@mipmap/ic_launcher_v9"
+            android:roundIcon="@mipmap/ic_launcher_v9"
+            android:exported="true"
+            android:enabled="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".MainActivityIconV10"
+            android:targetActivity=".MainActivity"
+            android:label="The Rift"
+            android:icon="@mipmap/ic_launcher_v10"
+            android:roundIcon="@mipmap/ic_launcher_v10"
+            android:exported="true"
+            android:enabled="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
 
         <!--
             RiftService foreground service.
-
-            foregroundServiceType="dataSync":
-              Introduced in API 29 (Android 10). On API 24–28 this attribute
-              is parsed but not enforced — it does not cause a crash or
-              installation failure on older devices. From API 29+ the system
-              uses this to apply the correct battery/doze exemptions.
-
-            stopWithTask="false":
-              Service survives the user swiping the app from recents. This
-              is intentional — The Rift must keep its WiFi locks alive to
-              remain discoverable and receive incoming transfers even when
-              the UI is not in the foreground.
         -->
         <service
             android:name=".RiftService"

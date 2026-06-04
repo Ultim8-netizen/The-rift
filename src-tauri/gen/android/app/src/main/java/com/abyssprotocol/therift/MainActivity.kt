@@ -9,24 +9,6 @@ import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 
-/**
- * MainActivity — Tauri WebView host.
- *
- * Compatible with API 24 (Android 7.0) through API 34+ (Android 14),
- * including Android Go edition devices.
- *
- * Initialisation order:
- *   1. super.onCreate() — Tauri loads the native .so and sets up the WebView.
- *   2. RiftAndroidHelper.init(this) — stores the ApplicationContext AND calls
- *      `nativeInitJvm()` which seeds the Rust-side JavaVM OnceLock.  Also
- *      caches a WeakReference to this Activity for URI permission resolution.
- *   3. handlePermissionsAndStartService() — requests runtime permissions and
- *      starts RiftService.
- *
- * onResume() refreshes the Activity WeakReference in RiftAndroidHelper so that
- * copyUriToCache always has a live Activity context available, even after a
- * rotation or configuration change rebuilds the Activity instance.
- */
 class MainActivity : TauriActivity() {
 
     companion object {
@@ -44,10 +26,19 @@ class MainActivity : TauriActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Refresh the Activity WeakReference so copyUriToCache always uses a
-        // live Activity ContentResolver. The Activity is recreated on rotation
-        // and other configuration changes, so onCreate alone is not enough.
         RiftAndroidHelper.updateActivity(this)
+    }
+
+    /**
+     * Called whenever the activity leaves the foreground (home press, back, screen off, etc.).
+     * We switch to a random icon here so that by the time the user glances at their launcher,
+     * the new icon is already applied.
+     */
+    override fun onStop() {
+        super.onStop()
+        // Run on a background thread — setComponentEnabledSetting does IPC and must
+        // not block the main thread. applicationContext outlives the activity.
+        Thread { IconSwitcher.switchRandom(applicationContext) }.start()
     }
 
     // ── Permissions ───────────────────────────────────────────────────────────
@@ -58,11 +49,9 @@ class MainActivity : TauriActivity() {
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
             perms.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
-
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) {
             perms.add(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             perms.add(Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -80,8 +69,7 @@ class MainActivity : TauriActivity() {
             Log.d(TAG, "All permissions already granted")
             startRiftService()
         } else {
-            Log.d(TAG,
-                "Requesting ${missing.size} runtime permission(s): ${missing.joinToString()}")
+            Log.d(TAG, "Requesting ${missing.size} runtime permission(s): ${missing.joinToString()}")
             ActivityCompat.requestPermissions(this, missing, PERMISSION_REQUEST_CODE)
         }
     }
