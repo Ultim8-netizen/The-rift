@@ -11,11 +11,14 @@ import { MobileTransfersPanel } from "./mobile/MobileTransfersPanel";
 import { TAB_ORDER, type Tab } from "@/utils/tabTypes";
 import { MobileTabBar } from "./mobile/MobileTabBar";
 import { ContactPanel } from "./ContactPanel";
+import { MobileTourOverlay } from "./mobile/MobileTourOverlay";
+import { MobileHelpPage } from "./mobile/MobileHelpPage";
 
 export function MobileLayout() {
-  const [tab,          setTab]          = useState<Tab>("send");
-  const [themeOpen,    setThemeOpen]    = useState(false);
-  const [contactOpen,  setContactOpen]  = useState(false);
+  const [tab,         setTab]         = useState<Tab>("send");
+  const [themeOpen,   setThemeOpen]   = useState(false);
+  const [contactOpen, setContactOpen] = useState(false);
+  const [helpOpen,    setHelpOpen]    = useState(false);
 
   const tabIndex    = TAB_ORDER.indexOf(tab);
   const touchStartX = useRef(0);
@@ -52,19 +55,31 @@ export function MobileLayout() {
       style={{ height: "100dvh", background: "rgb(var(--rift-bg))", position: "relative" }}
     >
       {/* ── Ambient orbs ─────────────────────────────────────────────────── */}
-      <div aria-hidden style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden", zIndex: 0 }}>
-        <div className="ambient-orb animate-orb-drift-a" style={{
-          width: "110vw", height: "110vw", top: "-35%", left: "-30%",
-          background: "radial-gradient(ellipse at center, rgb(var(--rift-accent) / 0.075) 0%, transparent 68%)",
-        }} />
-        <div className="ambient-orb animate-orb-drift-b" style={{
-          width: "90vw", height: "90vw", bottom: "-25%", right: "-20%",
-          background: "radial-gradient(ellipse at center, rgb(var(--rift-accent2) / 0.06) 0%, transparent 68%)",
-        }} />
-        <div className="ambient-orb animate-orb-drift-c" style={{
-          width: "70vw", height: "70vw", top: "38%", left: "25%",
-          background: "radial-gradient(ellipse at center, rgb(var(--rift-accent) / 0.032) 0%, transparent 70%)",
-        }} />
+      <div
+        aria-hidden
+        style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden", zIndex: 0 }}
+      >
+        <div
+          className="ambient-orb animate-orb-drift-a"
+          style={{
+            width: "110vw", height: "110vw", top: "-35%", left: "-30%",
+            background: "radial-gradient(ellipse at center, rgb(var(--rift-accent) / 0.075) 0%, transparent 68%)",
+          }}
+        />
+        <div
+          className="ambient-orb animate-orb-drift-b"
+          style={{
+            width: "90vw", height: "90vw", bottom: "-25%", right: "-20%",
+            background: "radial-gradient(ellipse at center, rgb(var(--rift-accent2) / 0.06) 0%, transparent 68%)",
+          }}
+        />
+        <div
+          className="ambient-orb animate-orb-drift-c"
+          style={{
+            width: "70vw", height: "70vw", top: "38%", left: "25%",
+            background: "radial-gradient(ellipse at center, rgb(var(--rift-accent) / 0.032) 0%, transparent 70%)",
+          }}
+        />
       </div>
 
       {/* ── Header ─────────────────────────────────────────────────────────── */}
@@ -76,13 +91,14 @@ export function MobileLayout() {
           display:        "flex",
           alignItems:     "center",
           justifyContent: "space-between",
-          padding:        "16px 20px 20px",
+          padding:        "14px 20px 18px",
           background:     "rgb(var(--rift-surface) / 0.9)",
           backdropFilter: "blur(52px) saturate(190%)",
         }}
       >
+        {/* ── Left: wordmark block ── */}
         <div>
-          {/* ── "The Rift" — cursive, bold, italic, gradient ── */}
+          {/* "The Rift" cursive title */}
           <h1
             style={{
               fontFamily:           "'Segoe Script', 'Apple Chancery', 'Brush Script MT', cursive",
@@ -96,32 +112,53 @@ export function MobileLayout() {
               WebkitTextFillColor:  "transparent",
               backgroundClip:       "text",
               filter:               "drop-shadow(0 0 18px rgb(var(--rift-glow) / 0.45))",
+              margin:               0,
             }}
           >
             The Rift
           </h1>
-          <div className="flex items-center gap-2 mt-1">
+
+          {/* Brand attribution — directly under the title, clearly its own line */}
+          <p
+            className="font-mono"
+            style={{
+              fontSize:      "8px",
+              letterSpacing: "0.2em",
+              color:         "rgb(var(--rift-muted) / 0.28)",
+              textTransform: "lowercase",
+              marginTop:     "2px",
+              marginBottom:  "5px",
+            }}
+          >
+            by abyssprotocol
+          </p>
+
+          {/* Device status row — visually separate from brand */}
+          <div className="flex items-center gap-2">
             <span
               className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-              style={{ background: statusDotColor, boxShadow: `0 0 6px ${statusDotColor}` }}
+              style={{
+                background: statusDotColor,
+                boxShadow:  `0 0 6px ${statusDotColor}`,
+              }}
             />
             <p
               className="font-mono"
-              style={{ fontSize: "9px", letterSpacing: "0.24em", color: "rgb(var(--rift-muted) / 0.5)", textTransform: "uppercase" }}
+              style={{
+                fontSize:      "9px",
+                letterSpacing: "0.24em",
+                color:         "rgb(var(--rift-muted) / 0.5)",
+                textTransform: "uppercase",
+              }}
             >
               {ownDeviceName}
-            </p>
-            <span style={{ color: "rgb(var(--rift-muted) / 0.2)", fontSize: 9 }}>·</span>
-            <p
-              className="font-mono"
-              style={{ fontSize: "8px", letterSpacing: "0.2em", color: "rgb(var(--rift-muted) / 0.32)", textTransform: "lowercase" }}
-            >
-              by abyssprotocol
             </p>
           </div>
         </div>
 
+        {/* ── Right: action buttons ── */}
         <div className="flex items-center gap-2">
+          {/* Selected device pill */}
           {selectedDevice && (
             <span
               className="text-[10px] font-mono px-2.5 py-1.5 rounded-full"
@@ -129,7 +166,7 @@ export function MobileLayout() {
                 color:        "rgb(var(--rift-accent))",
                 background:   "rgb(var(--rift-accent) / 0.1)",
                 boxShadow:    "0 0 0 1px rgb(var(--rift-accent) / 0.22)",
-                maxWidth:     "110px",
+                maxWidth:     "90px",
                 overflow:     "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace:   "nowrap",
@@ -143,15 +180,20 @@ export function MobileLayout() {
           <button
             onClick={() => setContactOpen(true)}
             title="Contact us"
-            className="w-9 h-9 flex items-center justify-center rounded-2xl transition-all"
+            className="flex items-center justify-center rounded-2xl transition-all"
             style={{
+              width:      "36px",
+              height:     "36px",
               background: "rgb(var(--rift-surface2) / 0.65)",
               boxShadow:  "0 0 0 1px rgb(255 255 255 / 0.07), 0 2px 10px rgb(0 0 0 / 0.28)",
               color:      "rgb(var(--rift-muted) / 0.65)",
             }}
           >
-            {/* Envelope icon */}
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+            <svg
+              width="16" height="16" viewBox="0 0 16 16"
+              fill="none" stroke="currentColor"
+              strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"
+            >
               <rect x="1" y="3" width="14" height="10" rx="2"/>
               <path d="M1 5l7 5 7-5"/>
             </svg>
@@ -160,8 +202,10 @@ export function MobileLayout() {
           {/* Theme button */}
           <button
             onClick={() => setThemeOpen(true)}
-            className="w-9 h-9 flex items-center justify-center rounded-2xl transition-all"
+            className="flex items-center justify-center rounded-2xl transition-all"
             style={{
+              width:      "36px",
+              height:     "36px",
               background: "rgb(var(--rift-surface2) / 0.65)",
               boxShadow:  "0 0 0 1px rgb(255 255 255 / 0.07), 0 2px 10px rgb(0 0 0 / 0.28)",
               color:      "rgb(var(--rift-muted) / 0.65)",
@@ -169,6 +213,28 @@ export function MobileLayout() {
             }}
           >
             ◑
+          </button>
+
+          {/* Help button — text pill, consistent with desktop status bar style */}
+          <button
+            onClick={() => setHelpOpen(true)}
+            title="Help & guide"
+            className="flex items-center justify-center rounded-2xl transition-all"
+            style={{
+              height:        "36px",
+              padding:       "0 12px",
+              background:    "rgb(var(--rift-surface2) / 0.65)",
+              boxShadow:     "0 0 0 1px rgb(255 255 255 / 0.07), 0 2px 10px rgb(0 0 0 / 0.28)",
+              color:         "rgb(var(--rift-muted) / 0.7)",
+              fontSize:      "10px",
+              fontFamily:    "'JetBrains Mono', monospace",
+              fontWeight:    700,
+              letterSpacing: "0.13em",
+              textTransform: "uppercase" as const,
+              flexShrink:    0,
+            }}
+          >
+            Help
           </button>
         </div>
 
@@ -207,7 +273,7 @@ export function MobileLayout() {
           <MobileTransfersPanel />
         </div>
 
-        {/* Bottom bleed: content melts into tab bar */}
+        {/* Bottom bleed */}
         <div
           aria-hidden
           style={{
@@ -228,8 +294,12 @@ export function MobileLayout() {
       <AcceptDialog />
       <IncomingTextDialog />
       <DevicePopup />
-      {themeOpen  && <MobileThemePicker onClose={() => setThemeOpen(false)} />}
-      {contactOpen && <ContactPanel onClose={() => setContactOpen(false)} />}
+      {themeOpen   && <MobileThemePicker onClose={() => setThemeOpen(false)} />}
+      {contactOpen && <ContactPanel      onClose={() => setContactOpen(false)} />}
+      {/* Mobile-specific full-screen help page — completely separate from desktop HelpPage */}
+      {helpOpen    && <MobileHelpPage    onClose={() => setHelpOpen(false)} />}
+      {/* Tour overlay — driven by store, started by App.tsx on first launch */}
+      <MobileTourOverlay />
     </div>
   );
 }
