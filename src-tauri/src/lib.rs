@@ -53,24 +53,26 @@ async fn get_app_state(state: State<'_, SharedState>) -> Result<AppStatePayload,
 async fn get_file_metadata(paths: Vec<String>) -> Result<Vec<StagedFile>, String> {
     let mut out = Vec::with_capacity(paths.len());
     for path in paths {
-        // Borrow `path` into a single-element slice so we can fall back to it
-        // in the error branch without having moved it.
         match android_fs::resolve_paths(std::slice::from_ref(&path)).await {
             Ok(mut resolved) if !resolved.is_empty() => {
                 let r = resolved.remove(0);
                 out.push(StagedFile {
                     name: r.name,
-                    // On Android this is the cache path; on desktop the
-                    // original path is returned unchanged.
                     path: r.real_path,
                     size_bytes: r.size,
                 });
             }
             _ => {
-                // Copy failed (e.g. permission denied for a cloud URI that has
-                // not been downloaded yet).  Show the file with unknown size so
-                // the user sees it in staging; attempting to send will produce a
-                // descriptive error via the normal send_files error path.
+                #[cfg(target_os = "android")]
+                if path.starts_with("content://") {
+                    return Err(
+                        "Could not read the selected file. \
+                         Storage permission may be missing, or the file comes from a \
+                         cloud provider that has not downloaded it yet. \
+                         Try selecting the file again, or move it to local storage first."
+                            .to_string(),
+                    );
+                }
                 let name = std::path::Path::new(&path)
                     .file_name()
                     .and_then(|n| n.to_str())

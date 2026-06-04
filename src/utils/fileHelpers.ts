@@ -32,6 +32,14 @@ async function enumFilesRecursive(dirPath: string): Promise<string[]> {
 export async function expandToPaths(rawPaths: string[]): Promise<string[]> {
   const result: string[] = [];
   for (const p of rawPaths) {
+    // Android content:// URIs are not filesystem paths — stat() on them either
+    // throws (harmless) or, on some Tauri/Android builds, returns isDirectory:true
+    // which routes the URI into enumFilesRecursive → empty result → filePaths=[].
+    // Bypass stat entirely and let Rust/JNI handle them via android_copy_uri.
+    if (p.startsWith("content://")) {
+      result.push(p);
+      continue;
+    }
     try {
       const info = await stat(p);
       if (info.isDirectory) result.push(...(await enumFilesRecursive(p)));

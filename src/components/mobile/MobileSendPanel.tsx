@@ -1,3 +1,4 @@
+// src/components/mobile/MobileSendPanel.tsx
 import { useCallback, useState } from "react";
 import { useRiftStore } from "@/store/riftStore";
 import { useTransferActions } from "@/hooks/useTransfer";
@@ -13,6 +14,8 @@ export function MobileSendPanel() {
   const [textMode,   setTextMode]   = useState(false);
   const [text,       setText]       = useState("");
   const [textStatus, setTextStatus] = useState<TextStatus>("idle");
+  const [stageError, setStageError] = useState<string | null>(null);
+  const [sendError,  setSendError]  = useState<string | null>(null);
 
   const stagedFiles    = useRiftStore((s) => s.stagedFiles);
   const setStagedFiles = useRiftStore((s) => s.setStagedFiles);
@@ -27,22 +30,38 @@ export function MobileSendPanel() {
   const canSendFiles = stagedFiles.length > 0 && !!selectedDevice && !isSending;
   const canSendText  = text.trim().length > 0 && !!selectedDevice && textStatus !== "sending";
 
+  // No try/catch here — errors propagate to callers (browse / handleSendFiles)
   const stageFromPaths = useCallback(async (rawPaths: string[]) => {
     if (!rawPaths.length) return;
-    try {
-      const filePaths = await expandToPaths(rawPaths);
-      if (!filePaths.length) return;
-      const files = await call<StagedFile[]>("get_file_metadata", { paths: filePaths });
-      setStagedFiles(files);
-    } catch (e) { console.error(e); }
+    const filePaths = await expandToPaths(rawPaths);
+    if (!filePaths.length) return;
+    const files = await call<StagedFile[]>("get_file_metadata", { paths: filePaths });
+    setStagedFiles(files);
   }, [call, setStagedFiles]);
 
   async function browse() {
+    setStageError(null);
+    setSendError(null);
     try {
       const res = await open({ multiple: true, directory: false });
       if (!res) return;
       await stageFromPaths(Array.isArray(res) ? res : [res]);
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setStageError(msg);
+      console.error("[MobileSendPanel] stageFromPaths error:", e);
+    }
+  }
+
+  async function handleSendFiles() {
+    setSendError(null);
+    try {
+      await sendFiles();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setSendError(msg);
+      console.error("[MobileSendPanel] sendFiles error:", e);
+    }
   }
 
   async function handleSendText() {
@@ -59,9 +78,11 @@ export function MobileSendPanel() {
     }
   }
 
+  const displayedError = stageError ?? sendError;
+
   return (
     <div style={{ width: "100vw", height: "100%", overflowY: "auto", overflowX: "hidden" }}>
-      {/* Portal3D hero — isMobile=true constrains all particle effects to canvas */}
+      {/* Portal3D hero */}
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", paddingTop: 8 }}>
         <p
           className="text-[8px] font-mono uppercase tracking-[0.32em] mb-1"
@@ -78,6 +99,35 @@ export function MobileSendPanel() {
       </div>
 
       <div className="px-4 flex flex-col gap-4 pb-10">
+
+        {/* ── Error banner ── */}
+        {displayedError && (
+          <div
+            className="rounded-2xl px-4 py-3 flex items-start gap-3"
+            style={{
+              background: "rgb(var(--rift-error) / 0.1)",
+              boxShadow: "0 0 0 1px rgb(var(--rift-error) / 0.25)",
+            }}
+          >
+            <span
+              className="flex-shrink-0 text-[11px] font-mono font-bold mt-0.5"
+              style={{ color: "rgb(var(--rift-error))" }}
+            >
+              ERR
+            </span>
+            <p className="text-[11px] font-mono leading-snug flex-1" style={{ color: "rgb(var(--rift-error) / 0.9)" }}>
+              {displayedError}
+            </p>
+            <button
+              onClick={() => { setStageError(null); setSendError(null); }}
+              className="flex-shrink-0 text-[10px] font-mono"
+              style={{ color: "rgb(var(--rift-error) / 0.55)" }}
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         {/* Target device indicator */}
         {selectedDevice ? (
           <div
@@ -125,7 +175,7 @@ export function MobileSendPanel() {
           {(["files", "text"] as const).map((mode) => (
             <button
               key={mode}
-              onClick={() => setTextMode(mode === "text")}
+              onClick={() => { setTextMode(mode === "text"); setStageError(null); setSendError(null); }}
               className="flex-1 py-2.5 rounded-xl text-[10px] font-mono font-bold uppercase tracking-widest transition-all duration-150"
               style={{
                 background: (mode === "text") === textMode
@@ -204,7 +254,7 @@ export function MobileSendPanel() {
                       + Add
                     </button>
                     <button
-                      onClick={clearStaged}
+                      onClick={() => { clearStaged(); setStageError(null); setSendError(null); }}
                       className="text-[10px] font-mono px-3 py-1.5 rounded-full"
                       style={{
                         color:      "rgb(var(--rift-error) / 0.8)",
@@ -231,7 +281,7 @@ export function MobileSendPanel() {
             )}
 
             <button
-              onClick={sendFiles}
+              onClick={handleSendFiles}
               disabled={!canSendFiles}
               className="w-full py-4 rounded-2xl font-mono text-sm font-bold tracking-[0.1em] uppercase transition-all duration-200 btn-accent disabled:opacity-40 disabled:cursor-not-allowed disabled:transform-none"
             >
