@@ -505,6 +505,13 @@ pub fn run() {
     // without paying re-spawn cost between them. 10s covers typical multi-file
     // transfer sessions where the user selects another batch immediately after
     // the first completes.
+    //
+    // Runtime lifetime: tauri::async_runtime::set() requires a TokioHandle,
+    // not the Runtime itself. The runtime must remain alive for the full
+    // process lifetime — dropping it would invalidate the handle and panic on
+    // the first spawn. Box::leak transfers ownership to the heap permanently,
+    // which is the correct pattern here since the runtime must outlive Tauri's
+    // builder and all spawned tasks.
     #[cfg(target_os = "android")]
     {
         let logical_cores = std::thread::available_parallelism()
@@ -525,7 +532,12 @@ pub fn run() {
             .build()
             .expect("[Runtime] Failed to build Tokio runtime");
 
-        tauri::async_runtime::set(rt);
+        // Extract the handle before leaking the runtime. The handle remains
+        // valid for the full process lifetime because Box::leak ensures the
+        // runtime is never dropped.
+        let handle = rt.handle().clone();
+        Box::leak(Box::new(rt));
+        tauri::async_runtime::set(handle);
     }
 
     let shared_state = new_shared_state();
