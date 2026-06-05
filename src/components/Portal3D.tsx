@@ -4,17 +4,14 @@
 
 import { useEffect, useRef } from "react";
 
-// ─── constants ────────────────────────────────────────────────────────────────
 const W  = 260, H = 260, CX = W / 2, CY = H / 2, SR = 58;
 const ND = 72;
 const NP = 72;
 const PK = 2.6;
 
-// ─── types ────────────────────────────────────────────────────────────────────
 type RGB = readonly [number, number, number];
 type V3  = [number, number, number];
 
-// ─── 3D helpers ───────────────────────────────────────────────────────────────
 function rx(v: V3, a: number): V3 {
   const c = Math.cos(a), s = Math.sin(a);
   return [v[0], v[1]*c - v[2]*s, v[1]*s + v[2]*c];
@@ -38,7 +35,6 @@ function isOccluded(p: V3, R: number): boolean {
   return r2 < R*R && p[2] < -Math.sqrt(Math.max(0, R*R - r2));
 }
 
-// ─── ring definitions ─────────────────────────────────────────────────────────
 interface Ring {
   radius: number; tiltX: number; tiltY: number; tiltZ: number;
   speed: number; rgb: RGB;
@@ -57,7 +53,6 @@ function ringPos3D(ring: Ring, phase: number, t: number): V3 {
   return p;
 }
 
-// ─── Cartesian deformation mesh ───────────────────────────────────────────────
 interface MeshPt {
   angle: number;
   bx: number; by: number;
@@ -161,7 +156,6 @@ function meshTip(mesh: MeshPt[], pullX: number, pullY: number): { x: number; y: 
   return { x: CX + mesh[best].x, y: CY + mesh[best].y };
 }
 
-// ─── Particles ────────────────────────────────────────────────────────────────
 interface Particle {
   ring: Ring; phase: number; size: number;
   sx: number; sy: number;
@@ -180,13 +174,11 @@ function makeParticles(): Particle[] {
   );
 }
 
-// ─── Shockwave rings ──────────────────────────────────────────────────────────
 interface Wave {
   x: number; y: number; r: number; maxR: number;
   alpha: number; rgb: RGB; screen: boolean; spd: number;
 }
 
-// ─── Drawing helpers ──────────────────────────────────────────────────────────
 function meshPath(ctx: CanvasRenderingContext2D, mesh: MeshPt[]): void {
   ctx.beginPath();
   for (let i = 0; i <= ND; i++) {
@@ -208,6 +200,7 @@ function drawSphere(
   ctx: CanvasRenderingContext2D, mesh: MeshPt[], acc: RGB,
   lxn: number, lyn: number, lzn: number,
   hxn: number, hyn: number,
+  mob: boolean,
 ): void {
   const [r, g, b] = acc;
   const BIG = SR * 5;
@@ -257,10 +250,15 @@ function drawSphere(
 
   ctx.save();
   meshPath(ctx, mesh);
-  ctx.shadowColor = `rgba(${r},${g},${b},0.5)`;
-  ctx.shadowBlur  = 14;
-  ctx.strokeStyle = `rgba(${r},${g},${b},${(0.2 + 0.12*(1-Math.abs(lzn))).toFixed(3)})`;
-  ctx.lineWidth   = 1.5;
+  if (!mob) {
+    ctx.shadowColor = `rgba(${r},${g},${b},0.5)`;
+    ctx.shadowBlur  = 14;
+  }
+  const edgeAlpha = mob
+    ? (0.38 + 0.18 * (1 - Math.abs(lzn))).toFixed(3)
+    : (0.2  + 0.12 * (1 - Math.abs(lzn))).toFixed(3);
+  ctx.strokeStyle = `rgba(${r},${g},${b},${edgeAlpha})`;
+  ctx.lineWidth   = mob ? 2.2 : 1.5;
   ctx.stroke();
   ctx.restore();
 }
@@ -284,7 +282,6 @@ function drawTentacle(
 
   const a1 = stretch * 30 * Math.sin(t * 9.2);
   const a2 = stretch * 22 * Math.sin(t * 5.7 + 1.8);
-
   const c1x = ox + dx * 0.22 + nx * a1;
   const c1y = oy + dy * 0.22 + ny * a1;
   const c2x = ox + dx * 0.70 - nx * a2;
@@ -302,7 +299,6 @@ function drawTentacle(
   const cr = (r1 + (140 - r1) * stretch * pulse)  | 0;
   const cg = (g1 + ( 80 - g1) * stretch * pulse)  | 0;
   const cb = (b1 + (255 - b1) * stretch * pulse)  | 0;
-
   const ir = (r1 + (160 - r1) * stretch * pulse2 * 0.8) | 0;
   const ig = (g1 + (240 - g1) * stretch * pulse2 * 0.5) | 0;
   const ib = (b1 + (255 - b1) * stretch * pulse2 * 0.9) | 0;
@@ -311,7 +307,6 @@ function drawTentacle(
 
   oc.save();
   oc.lineCap = "round";
-
   oc.shadowColor = `rgba(${cr},${cg},${cb},0.95)`;
   oc.shadowBlur  = 28 + stretch * 20;
   oc.strokeStyle = `rgba(${cr},${cg},${cb},${alpha})`;
@@ -320,7 +315,6 @@ function drawTentacle(
   oc.moveTo(ox, oy);
   oc.bezierCurveTo(c1x, c1y, c2x, c2y, mx, my);
   oc.stroke();
-
   oc.shadowColor = `rgba(${ir},${ig},${ib},0.75)`;
   oc.shadowBlur  = 14;
   oc.strokeStyle = `rgba(${ir},${ig},${ib},${alpha * 0.65})`;
@@ -329,7 +323,6 @@ function drawTentacle(
   oc.moveTo(ox, oy);
   oc.bezierCurveTo(c1bx, c1by, c2bx, c2by, mx, my);
   oc.stroke();
-
   oc.shadowBlur  = 5;
   oc.shadowColor = "rgba(255,255,255,0.9)";
   oc.strokeStyle = `rgba(255,255,255,${0.28 + stretch * 0.50})`;
@@ -338,26 +331,35 @@ function drawTentacle(
   oc.moveTo(ox, oy);
   oc.bezierCurveTo(c1x, c1y, c2x, c2y, mx, my);
   oc.stroke();
-
   oc.restore();
 }
 
-function drawWave(ctx: CanvasRenderingContext2D, wv: Wave): void {
+function drawWave(ctx: CanvasRenderingContext2D, wv: Wave, mob: boolean): void {
   const [r, g, b] = wv.rgb;
   const a = wv.alpha * (1 - wv.r / wv.maxR);
   if (a <= 0) return;
+  const lw = 2.6 * (1 - wv.r / wv.maxR) + 0.4;
   ctx.save();
-  ctx.shadowColor = `rgba(${r},${g},${b},${a.toFixed(3)})`;
-  ctx.shadowBlur  = 12;
+  if (!mob) {
+    ctx.shadowColor = `rgba(${r},${g},${b},${a.toFixed(3)})`;
+    ctx.shadowBlur  = 12;
+  }
   ctx.strokeStyle = `rgba(${r},${g},${b},${a.toFixed(3)})`;
-  ctx.lineWidth   = 2.6 * (1 - wv.r/wv.maxR) + 0.4;
+  ctx.lineWidth   = lw;
   ctx.beginPath();
-  ctx.arc(wv.x, wv.y, wv.r, 0, Math.PI*2);
+  ctx.arc(wv.x, wv.y, wv.r, 0, Math.PI * 2);
   ctx.stroke();
+  if (mob) {
+    ctx.strokeStyle = `rgba(${r},${g},${b},${(a * 0.28).toFixed(3)})`;
+    ctx.lineWidth   = lw * 3.5;
+    ctx.beginPath();
+    ctx.arc(wv.x, wv.y, wv.r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
-function drawLabel(ctx: CanvasRenderingContext2D, state: string, acc: RGB): void {
+function drawLabel(ctx: CanvasRenderingContext2D, state: string, acc: RGB, mob: boolean): void {
   const [r, g, b] = acc;
   const sym = state === "drop" ? "↓" : state === "send" ? "" : state === "ready" ? "" : "◈";
   const sub = state === "drop" ? "DROP" : state === "send" ? "SENDING" : state === "ready" ? "READY" : "RIFT";
@@ -365,27 +367,26 @@ function drawLabel(ctx: CanvasRenderingContext2D, state: string, acc: RGB): void
   ctx.textAlign = "center"; ctx.textBaseline = "middle";
   ctx.fillStyle = `rgb(${r},${g},${b})`;
   if (sym) {
-    ctx.shadowColor = `rgb(${r},${g},${b})`; ctx.shadowBlur = 20;
+    if (!mob) { ctx.shadowColor = `rgb(${r},${g},${b})`; ctx.shadowBlur = 20; }
     ctx.font = `900 ${sym === "◈" ? 22 : 28}px "JetBrains Mono",monospace`;
     ctx.fillText(sym, CX, sub ? CY - 5 : CY + 4);
   }
   if (sub) {
-    ctx.shadowBlur = 10;
+    if (!mob) ctx.shadowBlur = 10;
     ctx.font = '700 9px "JetBrains Mono",monospace';
     const sp = 3; const chars = [...sub];
     let tw = -sp;
     for (const c of chars) tw += ctx.measureText(c).width + sp;
-    let x = CX - tw/2; const y = sym ? CY + 14 : CY + 4;
+    let x = CX - tw / 2; const y = sym ? CY + 14 : CY + 4;
     for (const c of chars) {
       const cw = ctx.measureText(c).width;
-      ctx.fillText(c, x + cw/2, y);
+      ctx.fillText(c, x + cw / 2, y);
       x += cw + sp;
     }
   }
   ctx.restore();
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
 export interface Portal3DProps {
   dragging:  boolean;
   hasFiles:  boolean;
@@ -398,7 +399,6 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const frameRef   = useRef<number | null>(null);
   const t0Ref      = useRef(0);
-  // isMobile is intentionally absent — mob is read from the effect closure, not reactively.
   const propsRef   = useRef({ dragging, hasFiles, isSending });
 
   const meshRef      = useRef<MeshPt[]>(makeMesh());
@@ -412,14 +412,24 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
   const cleanupDragRef  = useRef<(() => void) | null>(null);
   const cleanupTouchRef = useRef<(() => void) | null>(null);
 
+  // Tracks whether the canvas is visible in the viewport.
+  // When the user switches to Devices or Transfers tab, the Send panel slides
+  // off-screen. Without this, Portal3D burns CPU/GPU animating an invisible canvas
+  // at 60fps continuously for the entire session.
+  const visibleRef  = useRef<boolean>(true);
+
+  // 30fps frame interval on mobile. Canvas 2D in Android WebView cannot sustain
+  // 60fps for this workload on a mid-range SoC. Skipping alternate frames while
+  // staying on rAF (so timing stays vsync-aligned) gives the main thread 33ms
+  // per frame instead of 16ms — within reach for this device.
+  const lastDrawRef = useRef<number>(0);
+
   useEffect(() => {
     propsRef.current = { dragging, hasFiles, isSending };
   }, [dragging, hasFiles, isSending]);
 
   useEffect(() => {
     t0Ref.current = performance.now();
-
-    // Locked at mount — component remounts on layout switch, so this never goes stale.
     const mob = isMobile ?? false;
 
     const canvasMaybe  = canvasRef.current;
@@ -451,9 +461,40 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
     resizeOL();
     window.addEventListener("resize", resizeOL);
 
+    // Pause animation when the canvas scrolls off-screen (off-tab slide).
+    // IntersectionObserver fires synchronously on the main thread, no overhead
+    // between frames.
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries[0].isIntersecting;
+        visibleRef.current = visible;
+        if (visible && frameRef.current === null) {
+          // Resume: reset prev so dt doesn't spike on return.
+          prev = performance.now();
+          frameRef.current = requestAnimationFrame(draw);
+        }
+      },
+      { threshold: 0.01 }
+    );
+    observer.observe(canvasEl);
+
     let prev = performance.now();
 
     function draw(now: number) {
+      // Visibility gate — do nothing if the canvas is off-screen.
+      if (!visibleRef.current) {
+        frameRef.current = null;
+        return;
+      }
+
+      // 30fps cap on mobile: schedule next frame unconditionally to stay
+      // vsync-aligned, but skip all drawing work if not enough time has elapsed.
+      frameRef.current = requestAnimationFrame(draw);
+      if (mob) {
+        if (now - lastDrawRef.current < 33.0) return;
+        lastDrawRef.current = now;
+      }
+
       const dt = Math.min((now - prev) / 1000, 0.04);
       prev      = now;
       const t   = (now - t0Ref.current) / 1000;
@@ -480,7 +521,6 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
         hover && !drag.active ? hover.cy : null,
       );
 
-      // ── Update shockwave rings ─────────────────────────────────────────────
       for (let i = waves.length - 1; i >= 0; i--) {
         const wv = waves[i];
         wv.r     += wv.spd * dt * 520;
@@ -488,17 +528,14 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
         if (wv.r >= wv.maxR || wv.alpha < 0.006) waves.splice(i, 1);
       }
 
-      // ── Update scattered particles ─────────────────────────────────────────
       for (const p of ps) {
         if (!p.scattered) continue;
-
         p.vy  += (mob ? 28 : 55) * dt;
         p.vx  *= 0.992; p.vy *= 0.992;
         p.sx  += p.vx * dt; p.sy += p.vy * dt;
         p.age += dt;
 
         if (mob) {
-          // Hard bounce within canvas bounds — particles never leave the 260×260 frame
           if (p.sx < 0)   { p.vx =  Math.abs(p.vx) * 0.5; p.sx = 0;  }
           if (p.sx > W)   { p.vx = -Math.abs(p.vx) * 0.5; p.sx = W;  }
           if (p.sy < 0)   { p.vy =  Math.abs(p.vy) * 0.5; p.sy = 0;  }
@@ -512,20 +549,19 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
 
         if (p.age > 2.8) {
           const p3  = ringPos3D(p.ring, p.phase, t);
-          const hsx = mob ? p3[0] + CX        : p3[0] + CX + rect.left;
-          const hsy = mob ? p3[1] + CY        : p3[1] + CY + rect.top;
+          const hsx = mob ? p3[0] + CX : p3[0] + CX + rect.left;
+          const hsy = mob ? p3[1] + CY : p3[1] + CY + rect.top;
           const ddx = hsx - p.sx, ddy = hsy - p.sy;
           const rK  = Math.min(PK * (p.age - 2.8) * 0.85, 7);
-          p.vx     += ddx * rK * dt * 60;
-          p.vy     += ddy * rK * dt * 60;
-          p.vx     *= 0.93; p.vy *= 0.93;
+          p.vx += ddx * rK * dt * 60;
+          p.vy += ddy * rK * dt * 60;
+          p.vx *= 0.93; p.vy *= 0.93;
           if (Math.sqrt(ddx*ddx + ddy*ddy) < 12 && Math.abs(p.vx) < 8 && Math.abs(p.vy) < 8) {
             p.scattered = false; p.age = 0;
           }
         }
       }
 
-      // ── Main canvas ────────────────────────────────────────────────────────
       ctx.clearRect(0, 0, W, H);
 
       const ambAlpha = d ? 0.22 : f ? 0.12 : 0.07;
@@ -556,17 +592,25 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
         const a  = depthAlpha(p3[2], p.ring.radius);
         if (a < 0.01) continue;
         const [pr, pg, pb] = p.ring.rgb;
-        ctx.save();
-        ctx.shadowColor = `rgba(${pr},${pg},${pb},${a})`;
-        ctx.shadowBlur  = p.size * 3.2;
-        ctx.globalAlpha = a;
-        ctx.fillStyle   = `rgb(${pr},${pg},${pb})`;
-        ctx.beginPath(); ctx.arc(p3[0]+CX, p3[1]+CY, p.size, 0, Math.PI*2); ctx.fill();
-        ctx.restore();
+        if (mob) {
+          ctx.fillStyle = `rgba(${pr},${pg},${pb},${a * 0.12})`;
+          ctx.beginPath(); ctx.arc(p3[0]+CX, p3[1]+CY, p.size * 3.2, 0, Math.PI*2); ctx.fill();
+          ctx.fillStyle = `rgba(${pr},${pg},${pb},${a * 0.45})`;
+          ctx.beginPath(); ctx.arc(p3[0]+CX, p3[1]+CY, p.size * 1.6, 0, Math.PI*2); ctx.fill();
+          ctx.fillStyle = `rgba(${pr},${pg},${pb},${a})`;
+          ctx.beginPath(); ctx.arc(p3[0]+CX, p3[1]+CY, p.size,       0, Math.PI*2); ctx.fill();
+        } else {
+          ctx.save();
+          ctx.shadowColor = `rgba(${pr},${pg},${pb},${a})`;
+          ctx.shadowBlur  = p.size * 3.2;
+          ctx.globalAlpha = a;
+          ctx.fillStyle   = `rgb(${pr},${pg},${pb})`;
+          ctx.beginPath(); ctx.arc(p3[0]+CX, p3[1]+CY, p.size, 0, Math.PI*2); ctx.fill();
+          ctx.restore();
+        }
       }
 
-      // ── PAINTER'S PASS 2: sphere ──────────────────────────────────────────
-      drawSphere(ctx, mesh, acc, lxn, lynN, lzn, hxn, hyn);
+      drawSphere(ctx, mesh, acc, lxn, lynN, lzn, hxn, hyn, mob);
 
       // ── PAINTER'S PASS 3: ring particles IN FRONT of sphere ───────────────
       for (const p of ps) {
@@ -577,32 +621,40 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
         if (isOccluded(p3, R)) continue;
         const a  = depthAlpha(p3[2], p.ring.radius);
         const [pr, pg, pb] = p.ring.rgb;
-        ctx.save();
-        ctx.shadowColor = `rgba(${pr},${pg},${pb},${a})`;
-        ctx.shadowBlur  = p.size * 3.8;
-        ctx.globalAlpha = a;
-        ctx.fillStyle   = `rgb(${pr},${pg},${pb})`;
-        ctx.beginPath(); ctx.arc(p3[0]+CX, p3[1]+CY, p.size, 0, Math.PI*2); ctx.fill();
-        ctx.restore();
+        if (mob) {
+          ctx.fillStyle = `rgba(${pr},${pg},${pb},${a * 0.12})`;
+          ctx.beginPath(); ctx.arc(p3[0]+CX, p3[1]+CY, p.size * 3.8, 0, Math.PI*2); ctx.fill();
+          ctx.fillStyle = `rgba(${pr},${pg},${pb},${a * 0.45})`;
+          ctx.beginPath(); ctx.arc(p3[0]+CX, p3[1]+CY, p.size * 1.8, 0, Math.PI*2); ctx.fill();
+          ctx.fillStyle = `rgba(${pr},${pg},${pb},${a})`;
+          ctx.beginPath(); ctx.arc(p3[0]+CX, p3[1]+CY, p.size,       0, Math.PI*2); ctx.fill();
+        } else {
+          ctx.save();
+          ctx.shadowColor = `rgba(${pr},${pg},${pb},${a})`;
+          ctx.shadowBlur  = p.size * 3.8;
+          ctx.globalAlpha = a;
+          ctx.fillStyle   = `rgb(${pr},${pg},${pb})`;
+          ctx.beginPath(); ctx.arc(p3[0]+CX, p3[1]+CY, p.size, 0, Math.PI*2); ctx.fill();
+          ctx.restore();
+        }
       }
 
-      // Canvas-local shockwave rings — both platforms
-      for (const wv of waves) if (!wv.screen) drawWave(ctx, wv);
+      for (const wv of waves) if (!wv.screen) drawWave(ctx, wv, mob);
 
-      // ── Mobile: scattered particles + tentacle stay on main canvas ─────────
+      // ── Mobile: scattered particles + tentacle on main canvas ──────────────
       if (mob) {
         for (const p of ps) {
           if (!p.scattered) continue;
           const [pr, pg, pb] = p.ring.rgb;
-          const age   = Math.min(p.age, 3) / 3;
-          const alpha = Math.max(0.1, 1 - age * 0.55);
-          ctx.save();
-          ctx.shadowColor = `rgba(${pr},${pg},${pb},${alpha})`;
-          ctx.shadowBlur  = p.size * 4.5;
-          ctx.globalAlpha = alpha;
-          ctx.fillStyle   = `rgb(${pr},${pg},${pb})`;
-          ctx.beginPath(); ctx.arc(p.sx, p.sy, p.size*(1 + age*0.7), 0, Math.PI*2); ctx.fill();
-          ctx.restore();
+          const age    = Math.min(p.age, 3) / 3;
+          const alpha  = Math.max(0.1, 1 - age * 0.55);
+          const rCore  = p.size * (1 + age * 0.7);
+          ctx.fillStyle = `rgba(${pr},${pg},${pb},${alpha * 0.12})`;
+          ctx.beginPath(); ctx.arc(p.sx, p.sy, rCore * 3.5, 0, Math.PI*2); ctx.fill();
+          ctx.fillStyle = `rgba(${pr},${pg},${pb},${alpha * 0.4})`;
+          ctx.beginPath(); ctx.arc(p.sx, p.sy, rCore * 1.8, 0, Math.PI*2); ctx.fill();
+          ctx.fillStyle = `rgba(${pr},${pg},${pb},${alpha})`;
+          ctx.beginPath(); ctx.arc(p.sx, p.sy, rCore,       0, Math.PI*2); ctx.fill();
         }
 
         if (drag.active && drag.stretch > 0.02) {
@@ -611,13 +663,11 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
         }
       }
 
-      drawLabel(ctx, state, acc);
+      drawLabel(ctx, state, acc, mob);
 
-      // ── Overlay canvas (desktop only) ──────────────────────────────────────
       oc.clearRect(0, 0, SW, SH);
 
       if (!mob) {
-        // Scattered particles on full-screen overlay
         for (const p of ps) {
           if (!p.scattered) continue;
           const [pr, pg, pb] = p.ring.rgb;
@@ -637,18 +687,12 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
           drawTentacle(oc, rect.left + tip.x, rect.top + tip.y, drag.sx, drag.sy, acc, drag.stretch, t);
         }
 
-        // Screen-space shockwave rings
-        for (const wv of waves) if (wv.screen) drawWave(oc, wv);
+        for (const wv of waves) if (wv.screen) drawWave(oc, wv, false);
       }
-
-      frameRef.current = requestAnimationFrame(draw);
     }
 
     frameRef.current = requestAnimationFrame(draw);
 
-    // ── Impact blast ──────────────────────────────────────────────────────────
-    // _releaseY is kept for call-site symmetry (mouseup + touchend both pass x,y)
-    // but vertical release position has no effect on trajectory in the current model.
     function launchImpact(stretch: number, releaseX: number, _releaseY: number) {
       const rect    = canvasEl.getBoundingClientRect();
       const accNow  = accentRef.current;
@@ -662,7 +706,6 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
 
       const wavesNow = wavesRef.current;
 
-      // Canvas-local rings — both platforms
       for (let i = 0; i < 3; i++) {
         const ii = i;
         setTimeout(() => {
@@ -671,8 +714,6 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
         }, i * 100);
       }
 
-      // Screen-space rings — desktop only
-      // wCsx/wCsy named distinctly to avoid shadowing the particle explosion center below.
       if (!mob) {
         const wCsx = rect.left + CX, wCsy = rect.top + CY;
         const wCount = 4 + Math.floor(stretch * 4);
@@ -724,7 +765,6 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
       });
     }
 
-    // ── Desktop mouse listeners ────────────────────────────────────────────
     function onMouseMoveCanvas(e: globalThis.MouseEvent) {
       const r = canvasEl.getBoundingClientRect();
       hoverRef.current = { cx: e.clientX - r.left, cy: e.clientY - r.top };
@@ -773,14 +813,12 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
       cleanupDragRef.current = () => window.removeEventListener("mousemove", onMove);
     }
 
-    // ── Mobile touch listeners ─────────────────────────────────────────────
     function onTouchStartCanvas(e: globalThis.TouchEvent) {
       e.preventDefault();
       const r     = canvasEl.getBoundingClientRect();
       const touch = e.touches[0];
       const cx    = touch.clientX - r.left;
       const cy    = touch.clientY - r.top;
-      // Slightly more generous hit area on mobile — finger > cursor
       if (Math.sqrt((cx-CX)**2 + (cy-CY)**2) > SR * 2.2) return;
 
       dragRef.current  = { active: true, cx, cy, sx: touch.clientX, sy: touch.clientY, stretch: 0 };
@@ -818,7 +856,6 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
       cleanupTouchRef.current = () => document.removeEventListener("touchmove", onTouchMove);
     }
 
-    // Register event handlers by platform
     if (mob) {
       canvasEl.addEventListener("touchstart", onTouchStartCanvas, { passive: false });
     } else {
@@ -828,6 +865,7 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
     }
 
     return () => {
+      observer.disconnect();
       if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
       window.removeEventListener("resize", resizeOL);
       cleanupDragRef.current?.();
@@ -854,9 +892,6 @@ export function Portal3D({ dragging, hasFiles, isSending, isMobile }: Portal3DPr
           zIndex:     2,
         }}
       />
-      {/* Overlay: desktop uses it for full-screen particles, tentacle, and shockwaves.
-          Mobile keeps it in the DOM for the ref but sinks it below all content;
-          nothing is drawn on it in mobile mode. */}
       <canvas
         ref={overlayRef}
         style={{

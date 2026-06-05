@@ -27,7 +27,7 @@ export function MobileTabBar({ tab, setTab }: MobileTabBarProps) {
         position:       "relative",
         zIndex:         10,
         background:     "rgb(var(--rift-surface) / 0.96)",
-        backdropFilter: "blur(52px) saturate(190%)",
+        backdropFilter: "blur(16px) saturate(190%)",
         paddingBottom:  "env(safe-area-inset-bottom, 0px)",
       }}
     >

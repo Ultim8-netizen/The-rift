@@ -124,18 +124,25 @@ async fn rescan(
         }
     });
 
-    let s2 = state.inner().clone();
-    let a2 = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let our_ip = local_ip_address::local_ip()
-            .ok()
-            .and_then(|ip| match ip {
-                std::net::IpAddr::V4(v4) => Some(v4),
-                _ => None,
-            })
-            .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
-        network::run_subnet_scan(our_ip, s2, a2).await;
-    });
+    // Subnet scan is desktop-only. On Android the /24 probe saturates the
+    // Tokio I/O driver at startup and can trigger AP rate-limiting. mDNS and
+    // UDP broadcast (already running) are the correct discovery mechanisms
+    // on mobile and cover the same devices without the scan cost.
+    #[cfg(not(target_os = "android"))]
+    {
+        let s2 = state.inner().clone();
+        let a2 = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let our_ip = local_ip_address::local_ip()
+                .ok()
+                .and_then(|ip| match ip {
+                    std::net::IpAddr::V4(v4) => Some(v4),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
+            network::run_subnet_scan(our_ip, s2, a2).await;
+        });
+    }
 
     Ok(())
 }
@@ -203,7 +210,7 @@ async fn send_files(
 
     let transfer_id = uuid::Uuid::new_v4().to_string();
 
-    // ── Emit transfer_started so the sender sees their own transfer ────────────
+    // ── Emit transfer_started so the sender sees their own transfer ──────────
     {
         let total_bytes: u64 = files.iter().map(|f| f.size_bytes).sum();
         let files_json: Vec<serde_json::Value> = files
@@ -469,6 +476,58 @@ async fn detect_hotspot(state: State<'_, SharedState>) -> Result<HotspotInfo, St
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ── Android: dynamic Tokio runtime configuration ──────────────────────────
+    // Must be called before Builder::default(). All tauri::async_runtime::spawn
+    // calls for the lifetime of the app inherit this runtime.
+    //
+    // worker_threads: half of available logical CPUs, floored at 2. Prevents
+    // Tokio from saturating all cores and starving the render thread under
+    // transfer load. available_parallelism already reflects parked efficiency
+    // cores under thermal throttling, so the value is always current.
+    //
+    //   2-core  device: 2 workers  (floor applied)
+    //   4-core  device: 2 workers
+    //   6-core  device: 3 workers
+    //   8-core  device: 4 workers
+    //   10-core device: 5 workers
+    //
+    // max_blocking_threads: caps the spawn_blocking pool at 16. The default of
+    // 512 is a desktop assumption; 16 is more than sufficient for concurrent
+    // file copies and prevents runaway thread spawning on slow storage I/O.
+    //
+    // thread_stack_size: reduces worker stacks from 2MB to 512KB. Async I/O
+    // tasks have shallow call stacks; the full 2MB is never touched, but the
+    // kernel reserves it as virtual address space regardless. Saves ~3MB RSS
+    // per worker pair on a 4-core device.
+    //
+    // thread_keep_alive: retained at the standard 10s. Blocking threads
+    // spawned for file copies must remain available for back-to-back transfers
+    // without paying re-spawn cost between them. 10s covers typical multi-file
+    // transfer sessions where the user selects another batch immediately after
+    // the first completes.
+    #[cfg(target_os = "android")]
+    {
+        let logical_cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let worker_threads = (logical_cores / 2).max(2);
+        eprintln!(
+            "[Runtime] Android: {logical_cores} logical cores detected, \
+             capping Tokio at {worker_threads} worker threads"
+        );
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(worker_threads)
+            .max_blocking_threads(16)
+            .thread_stack_size(512 * 1024)
+            .thread_keep_alive(std::time::Duration::from_secs(10))
+            .enable_all()
+            .build()
+            .expect("[Runtime] Failed to build Tokio runtime");
+
+        tauri::async_runtime::set(rt);
+    }
+
     let shared_state = new_shared_state();
 
     tauri::Builder::default()
@@ -511,6 +570,11 @@ pub fn run() {
                     })
                     .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
 
+                // Captive portal is desktop-only. On Android writing to
+                // /etc/hosts requires root and the redirect server serves no
+                // purpose; skipping it avoids an idle port listener for the
+                // entire session.
+                #[cfg(not(target_os = "android"))]
                 let _ = network::captive::start_captive_portal(our_ip).await;
 
                 #[cfg(target_os = "windows")]
@@ -568,6 +632,12 @@ pub fn run() {
                     });
                 }
 
+                // Subnet scan is desktop-only. On Android probing up to 255
+                // addresses saturates the Tokio I/O driver at startup and can
+                // trigger AP rate-limiting. mDNS and UDP broadcast (already
+                // running above) cover the same devices on mobile without the
+                // scan cost.
+                #[cfg(not(target_os = "android"))]
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -583,8 +653,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("The Rift failed to start")
         .run(|_app, event| {
+            // Hosts file cleanup is desktop-only. On Android the write has no
+            // effect without root; skipping block_on here makes the exit path
+            // instantaneous on mobile instead of awaiting a doomed syscall.
+            #[cfg(not(target_os = "android"))]
             if let tauri::RunEvent::Exit = event {
                 tauri::async_runtime::block_on(network::captive::cleanup_hosts_file());
             }
+            // Suppress unused variable warning on Android where the cfg gate
+            // above means `event` is never read.
+            #[cfg(target_os = "android")]
+            let _ = event;
         });
 }

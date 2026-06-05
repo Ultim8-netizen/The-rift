@@ -25,9 +25,24 @@ export function useDeviceEvents() {
     call("start_discovery");
   }, [call, setOwnDeviceName, setNetworkStatus]);
 
+  // Single device discovery (mDNS, broadcast, heartbeat recovery).
   useTauriEvent<Device>("device_discovered", (device) => {
     addDevice(device);
     setNetworkStatus("connected");
+  });
+
+  // Batch discovery from subnet scan completion.
+  // All devices arrive in one event after the scan finishes, causing a single
+  // React reconciliation pass instead of N separate ones that were stacking
+  // against Portal3D's animation frame and producing Davey drops.
+  // React 18 auto-batches the addDevice calls below into one re-render.
+  useTauriEvent<Device[]>("devices_discovered_batch", (devices) => {
+    for (const device of devices) {
+      addDevice(device);
+    }
+    if (devices.length > 0) {
+      setNetworkStatus("connected");
+    }
   });
 
   useTauriEvent<{ id: string }>("device_lost", ({ id }) => {
@@ -35,12 +50,10 @@ export function useDeviceEvents() {
   });
 
   useTauriEvent<{ deviceId: string }>("device_reconnecting", ({ deviceId }) => {
-    // Device lost contact but is still in state — just flag it visually.
     addReconnecting(deviceId);
   });
 
   useTauriEvent<{ deviceId: string }>("device_recovered", ({ deviceId }) => {
-    // Heartbeat succeeded again after earlier failures.
     removeReconnecting(deviceId);
   });
 
@@ -48,7 +61,6 @@ export function useDeviceEvents() {
     "device_latency_update",
     ({ deviceId, latencyMs }) => {
       updateDeviceLatency(deviceId, latencyMs);
-      // A successful latency ping means the device is alive — clear reconnecting.
       removeReconnecting(deviceId);
     }
   );
@@ -64,7 +76,6 @@ export function useDeviceEvents() {
 
   useTauriEvent<{ deviceId: string }>("device_channel_connected", ({ deviceId }) => {
     addRiftedDevice(deviceId);
-    // TCP rift channel is live → device is definitely reachable.
     removeReconnecting(deviceId);
   });
 

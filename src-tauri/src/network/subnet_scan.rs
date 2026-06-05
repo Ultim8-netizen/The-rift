@@ -2,8 +2,14 @@
 //! before we started, or that mDNS/broadcast hasn't surfaced yet.
 //!
 //! Probes every host in the local /24 in parallel (capped at MAX_CONCURRENT)
-//! via GET /hello.  Discovered devices are upserted into state and a rift
-//! channel attempt is made, identical to what mDNS discovery does.
+//! via GET /hello.  Discovered devices are collected across all concurrent
+//! tasks and emitted as a single `devices_discovered_batch` event after all
+//! probes complete, rather than one `device_discovered` per device.
+//!
+//! This eliminates the Davey frame drop that occurred when the scan completed
+//! and fired ~N rapid-succession IPC events into the WebView simultaneously,
+//! each triggering a Zustand state update and React reconciliation pass while
+//! Portal3D was mid-frame on the main thread.
 
 use super::rift_channel;
 use crate::state::{Device, SharedState};
@@ -11,6 +17,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
+use tokio::sync::Mutex as TokioMutex;
 
 const SCAN_TIMEOUT_MS: u64 = 700;
 const MAX_CONCURRENT: usize = 40;
@@ -41,6 +48,12 @@ pub async fn run_subnet_scan(our_ip: Ipv4Addr, state: SharedState, app: AppHandl
         .unwrap_or_else(|_| reqwest::Client::new());
 
     let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
+
+    /// Devices discovered for the first time during this scan.
+    /// Each task pushes here instead of emitting immediately.
+    /// After all handles join, a single batch event is emitted.
+    let batch: Arc<TokioMutex<Vec<Device>>> = Arc::new(TokioMutex::new(Vec::new()));
+
     let mut handles = Vec::with_capacity(254);
 
     for last in 1u8..=254 {
@@ -49,11 +62,12 @@ pub async fn run_subnet_scan(our_ip: Ipv4Addr, state: SharedState, app: AppHandl
             continue;
         }
 
-        let client  = client.clone();
-        let state   = state.clone();
-        let app     = app.clone();
-        let own_id  = own_id.clone();
-        let sem     = sem.clone();
+        let client     = client.clone();
+        let state      = state.clone();
+        let app        = app.clone();
+        let own_id     = own_id.clone();
+        let sem        = sem.clone();
+        let batch      = batch.clone();
 
         handles.push(tokio::spawn(async move {
             let _permit = match sem.acquire().await {
@@ -95,9 +109,12 @@ pub async fn run_subnet_scan(our_ip: Ipv4Addr, state: SharedState, app: AppHandl
 
             if !already {
                 eprintln!("[Scan] Found: {} @ {ip}", hello.id);
-                let _ = app.emit("device_discovered", &device);
+                // Queue for batch emit — do NOT emit device_discovered here.
+                batch.lock().await.push(device.clone());
             }
 
+            // Rift channel connection starts immediately per-device as found.
+            // This is Tokio async work and does not touch the WebView/JS thread.
             rift_channel::connect_to_peer(ip, hello.id, own_id, state, app).await;
         }));
     }
@@ -105,5 +122,13 @@ pub async fn run_subnet_scan(our_ip: Ipv4Addr, state: SharedState, app: AppHandl
     for h in handles {
         let _ = h.await;
     }
+
+    // Single IPC call for all discovered devices — one React reconciliation
+    // pass instead of N, eliminating the post-scan Davey spike.
+    let found = batch.lock().await;
+    if !found.is_empty() {
+        let _ = app.emit("devices_discovered_batch", &*found);
+    }
+
     eprintln!("[Scan] Subnet scan complete");
 }

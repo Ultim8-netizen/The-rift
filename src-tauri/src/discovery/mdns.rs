@@ -6,7 +6,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
 const SERVICE_TYPE: &str = "_therift._tcp.local.";
-/// Reduced from 25 s to 10 s so late-joining devices hear us faster.
+
+/// 30 s on Android (battery + render thread relief), 10 s on desktop.
+/// mDNS is a secondary discovery path on mobile... subnet scan and UDP
+/// broadcast cover fast detection. Re-announcing every 10 s was causing
+/// a confirmed Davey frame drop on the test device each cycle.
+#[cfg(target_os = "android")]
+const REANNOUNCE_SECS: u64 = 30;
+#[cfg(not(target_os = "android"))]
 const REANNOUNCE_SECS: u64 = 10;
 
 pub async fn start_discovery(state: SharedState, app: AppHandle) -> anyhow::Result<()> {
@@ -82,26 +89,18 @@ pub async fn start_discovery(state: SharedState, app: AppHandle) -> anyhow::Resu
                     let peer_os = get_prop(&info, "os");
                     let peer_name = {
                         let n = get_prop(&info, "name");
-                        if n.is_empty() {
-                            "Unknown Device".to_string()
-                        } else {
-                            n
-                        }
+                        if n.is_empty() { "Unknown Device".to_string() } else { n }
                     };
 
                     let peer_ip = info
                         .get_addresses()
                         .iter()
                         .filter_map(|a| match a {
-                            std::net::IpAddr::V4(v4) if !v4.is_loopback() => {
-                                Some(v4.to_string())
-                            }
+                            std::net::IpAddr::V4(v4) if !v4.is_loopback() => Some(v4.to_string()),
                             _ => None,
                         })
                         .next()
-                        .unwrap_or_else(|| {
-                            info.get_hostname().trim_end_matches('.').to_string()
-                        });
+                        .unwrap_or_else(|| info.get_hostname().trim_end_matches('.').to_string());
 
                     let peer_port = info.get_port();
                     let now = unix_now_ms();
@@ -135,15 +134,6 @@ pub async fn start_discovery(state: SharedState, app: AppHandle) -> anyhow::Resu
                 }
 
                 Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
-                    // ── KEY FIX ──────────────────────────────────────────────
-                    // Do NOT remove the device from state here.  mDNS emits
-                    // ServiceRemoved on any cache expiry, interface change, or
-                    // brief multicast hiccup — none of which means the device
-                    // is actually gone.  The heartbeat owns true eviction after
-                    // 30 s of confirmed HTTP + rift-channel failure.
-                    //
-                    // We do emit device_reconnecting so the UI shows an amber
-                    // dot, giving the user a heads-up without breaking anything.
                     let s = state_clone.clone();
                     let a = app_clone.clone();
                     rt.spawn(async move {
@@ -167,7 +157,6 @@ pub async fn start_discovery(state: SharedState, app: AppHandle) -> anyhow::Resu
 
                 Ok(_) => {}
 
-                // Timeout → re-announce so late-joining peers see us
                 Err(flume::RecvTimeoutError::Timeout) => {
                     eprintln!("[mDNS] Re-announcing service");
                     register(&mdns);

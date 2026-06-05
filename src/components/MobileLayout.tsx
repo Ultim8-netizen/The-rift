@@ -54,33 +54,27 @@ export function MobileLayout() {
       className="flex flex-col font-sans text-rift-text select-none overflow-hidden"
       style={{ height: "100dvh", background: "rgb(var(--rift-bg))", position: "relative" }}
     >
-      {/* ── Ambient orbs ─────────────────────────────────────────────────── */}
+      {/* ── Ambient glow ─────────────────────────────────────────────────────
+          Replaced the three `filter: blur(80px)` animated orb divs with a
+          single static radial-gradient background. The blur filter required
+          a gaussian kernel pass per orb per frame on the CPU compositor,
+          contributing to the persistent 10-20fps baseline. Radial gradients
+          are native GPU fill operations with zero filter overhead.
+      ────────────────────────────────────────────────────────────────────── */}
       <div
         aria-hidden
-        style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden", zIndex: 0 }}
-      >
-        <div
-          className="ambient-orb animate-orb-drift-a"
-          style={{
-            width: "110vw", height: "110vw", top: "-35%", left: "-30%",
-            background: "radial-gradient(ellipse at center, rgb(var(--rift-accent) / 0.075) 0%, transparent 68%)",
-          }}
-        />
-        <div
-          className="ambient-orb animate-orb-drift-b"
-          style={{
-            width: "90vw", height: "90vw", bottom: "-25%", right: "-20%",
-            background: "radial-gradient(ellipse at center, rgb(var(--rift-accent2) / 0.06) 0%, transparent 68%)",
-          }}
-        />
-        <div
-          className="ambient-orb animate-orb-drift-c"
-          style={{
-            width: "70vw", height: "70vw", top: "38%", left: "25%",
-            background: "radial-gradient(ellipse at center, rgb(var(--rift-accent) / 0.032) 0%, transparent 70%)",
-          }}
-        />
-      </div>
+        style={{
+          position:      "absolute",
+          inset:         0,
+          pointerEvents: "none",
+          zIndex:        0,
+          background: `
+            radial-gradient(ellipse 55% 40% at 5% 0%, rgb(var(--rift-accent) / 0.07) 0%, transparent 65%),
+            radial-gradient(ellipse 50% 35% at 95% 100%, rgb(var(--rift-accent2) / 0.055) 0%, transparent 65%),
+            radial-gradient(ellipse 35% 30% at 50% 45%, rgb(var(--rift-accent) / 0.028) 0%, transparent 70%)
+          `,
+        }}
+      />
 
       {/* ── Header ─────────────────────────────────────────────────────────── */}
       <header
@@ -93,12 +87,10 @@ export function MobileLayout() {
           justifyContent: "space-between",
           padding:        "14px 20px 18px",
           background:     "rgb(var(--rift-surface) / 0.9)",
-          backdropFilter: "blur(52px) saturate(190%)",
+          backdropFilter: "blur(16px) saturate(190%)",
         }}
       >
-        {/* ── Left: wordmark block ── */}
         <div>
-          {/* "The Rift" cursive title */}
           <h1
             style={{
               fontFamily:           "'Segoe Script', 'Apple Chancery', 'Brush Script MT', cursive",
@@ -119,7 +111,6 @@ export function MobileLayout() {
             The Rift
           </h1>
 
-          {/* Brand attribution — directly under the title, clearly its own line */}
           <p
             className="font-mono"
             style={{
@@ -134,7 +125,6 @@ export function MobileLayout() {
             by abyssprotocol
           </p>
 
-          {/* Device status row — visually separate from brand */}
           <div className="flex items-center gap-2">
             <span
               className="w-1.5 h-1.5 rounded-full flex-shrink-0"
@@ -157,9 +147,7 @@ export function MobileLayout() {
           </div>
         </div>
 
-        {/* ── Right: action buttons ── */}
         <div className="flex items-center gap-2">
-          {/* Selected device pill */}
           {selectedDevice && (
             <span
               className="text-[10px] font-mono px-2.5 py-1.5 rounded-full"
@@ -177,7 +165,6 @@ export function MobileLayout() {
             </span>
           )}
 
-          {/* Contact button */}
           <button
             onClick={() => setContactOpen(true)}
             title="Contact us"
@@ -200,7 +187,6 @@ export function MobileLayout() {
             </svg>
           </button>
 
-          {/* Theme button */}
           <button
             onClick={() => setThemeOpen(true)}
             className="flex items-center justify-center rounded-2xl transition-all"
@@ -216,7 +202,6 @@ export function MobileLayout() {
             ◑
           </button>
 
-          {/* Help button — text pill, consistent with desktop status bar style */}
           <button
             onClick={() => setHelpOpen(true)}
             title="Help & guide"
@@ -239,7 +224,6 @@ export function MobileLayout() {
           </button>
         </div>
 
-        {/* Bottom bleed */}
         <div
           aria-hidden
           style={{
@@ -274,7 +258,6 @@ export function MobileLayout() {
           <MobileTransfersPanel />
         </div>
 
-        {/* Bottom bleed */}
         <div
           aria-hidden
           style={{
@@ -291,15 +274,12 @@ export function MobileLayout() {
 
       <MobileTabBar tab={tab} setTab={setTab} />
 
-      {/* ── Overlays ────────────────────────────────────────────────────────── */}
       <AcceptDialog />
       <IncomingTextDialog />
       <DevicePopup />
       {themeOpen   && <MobileThemePicker onClose={() => setThemeOpen(false)} />}
       {contactOpen && <ContactPanel      onClose={() => setContactOpen(false)} />}
-      {/* Mobile-specific full-screen help page — completely separate from desktop HelpPage */}
       {helpOpen    && <MobileHelpPage    onClose={() => setHelpOpen(false)} />}
-      {/* Tour overlay — driven by store, started by App.tsx on first launch */}
       <MobileTourOverlay />
     </div>
   );
