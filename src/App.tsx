@@ -17,20 +17,33 @@ import { IncomingTextDialog } from "@/components/IncomingTextDialog";
 import { TourOverlay, TOUR_SEEN_KEY } from "@/components/TourOverlay";
 import { HelpPage } from "@/components/HelpPage";
 import { SplashScreen } from "@/components/SplashScreen";
+import { AgreementScreen } from "@/components/AgreementScreen";
+import { MobileAgreementScreen } from "@/components/mobile/MobileAgreementScreen";
 import { useRiftStore } from "@/store/riftStore";
+import { AGREEMENT_KEY } from "@/utils/legalContent";
 
 const SPLASH_KEY = "rift-splash-v1";
 
 export default function App() {
+  // ── Agreement ──────────────────────────────────────────────────────────────
+  // Seeded synchronously from localStorage. If the user has never accepted the
+  // agreement on this device, agreed === false and the gate renders before
+  // anything else. This check costs a single synchronous localStorage.getItem
+  // at mount — no async, no flash.
+  const [agreed, setAgreed] = useState<boolean>(
+    () => localStorage.getItem(AGREEMENT_KEY) === "1"
+  );
+
+  // ── Splash ─────────────────────────────────────────────────────────────────
   // Check once per session — sessionStorage clears when the Tauri webview
   // is fully closed, so the splash plays on every fresh app launch.
   const [splashDone, setSplashDone] = useState(() => {
     return sessionStorage.getItem(SPLASH_KEY) === "1";
   });
 
-  // Hooks must be called unconditionally. Discovery starts immediately in the
-  // background while the splash plays — devices are often ready by the time
-  // the animation finishes.
+  // Hooks must be called unconditionally (Rules of Hooks). Discovery starts
+  // in the background while the agreement / splash plays — by the time the
+  // user accepts and the splash finishes, devices are often already visible.
   useTheme();
   useDevices();
   useTransferEvents();
@@ -47,6 +60,23 @@ export default function App() {
     }, 650);
     return () => clearTimeout(t);
   }, [splashDone]);
+
+  // ── Agreement gate ─────────────────────────────────────────────────────────
+  // Must be checked before the splash so the user never sees app content
+  // until they have accepted. The agreement screens are self-contained and
+  // do not depend on any Tauri event data, so rendering them while hooks
+  // are warming up in the background is safe.
+  if (!agreed) {
+    function handleAgreementAccept() {
+      localStorage.setItem(AGREEMENT_KEY, "1");
+      setAgreed(true);
+    }
+
+    if (isMobile) {
+      return <MobileAgreementScreen onAccept={handleAgreementAccept} />;
+    }
+    return <AgreementScreen onAccept={handleAgreementAccept} />;
+  }
 
   // ── Splash ─────────────────────────────────────────────────────────────────
   if (!splashDone) {

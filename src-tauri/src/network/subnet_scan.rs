@@ -49,9 +49,9 @@ pub async fn run_subnet_scan(our_ip: Ipv4Addr, state: SharedState, app: AppHandl
 
     let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
 
-    /// Devices discovered for the first time during this scan.
-    /// Each task pushes here instead of emitting immediately.
-    /// After all handles join, a single batch event is emitted.
+    // Devices discovered for the first time during this scan.
+    // Each task pushes here instead of emitting immediately.
+    // After all handles join, a single batch event is emitted.
     let batch: Arc<TokioMutex<Vec<Device>>> = Arc::new(TokioMutex::new(Vec::new()));
 
     let mut handles = Vec::with_capacity(254);
