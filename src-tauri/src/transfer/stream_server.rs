@@ -17,6 +17,9 @@
 //!   application layer is occupied with disk I/O.
 //! • Single reusable chunk_buf per connection — one Vec allocation per
 //!   connection instead of one per chunk (263 allocations for a 526 MB file).
+//! • TCP keepalive on every accepted socket — OS RSTs the socket within ~11 s
+//!   of a silent WiFi drop so the sender's worker triggers reconnect rather
+//!   than stalling until ACK_TIMEOUT fires.
 
 use crate::state::SharedState;
 use crate::transfer::manifest::DEFAULT_CHUNK_SIZE;
@@ -66,6 +69,10 @@ async fn handle_connection(stream: TcpStream, state: SharedState, app: AppHandle
     // until either a 40 ms delayed-ACK timer fires or enough data accumulates,
     // adding 40 ms to every chunk's round trip on the sender side.
     let _ = stream.set_nodelay(true);
+    // OS keepalive: if the WiFi drops mid-transfer, the OS RSTs the socket
+    // within ~11 s and the sender's worker triggers reconnect. Without this,
+    // a silent link failure would stall the transfer until ACK_TIMEOUT fires.
+    crate::network::apply_tcp_keepalive(&stream);
     if let Err(e) = handle_connection_inner(stream, state, app).await {
         eprintln!("[StreamServer] Connection error: {e}");
     }

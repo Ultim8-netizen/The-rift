@@ -7,6 +7,10 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
@@ -41,11 +45,21 @@ import androidx.core.app.ServiceCompat
  *     Without this, the rift-channel TCP ping loop suspends and
  *     connections time out within 30-60 s of screen lock.
  *
- * NotificationCompat is used throughout instead of the platform
- * Notification.Builder. The platform builder is unreliable below API 31
- * and can trigger an ANR if startForeground() does not post its
- * notification within 5 seconds — a race that is common on low-RAM
- * Go edition devices. NotificationCompat resolves this across all APIs.
+ * Additionally, this service binds the process to the WiFi network via
+ * ConnectivityManager.bindProcessToNetwork(). This is critical on Android 10+
+ * when The Rift is operating as a hotspot CLIENT:
+ *
+ *   Problem: If the hotspot network has no upstream internet access, Android
+ *   marks it as "not satisfied" and routes all new TCP connections over the
+ *   default network (typically cellular). Rust's tokio runtime then opens
+ *   connections over LTE — devices appear discovered (UDP broadcast works on
+ *   all interfaces) but every connect() attempt goes over the wrong network.
+ *   Result: "unable to find device", timeouts, and mid-transfer disconnects.
+ *
+ *   Fix: bindProcessToNetwork() forces ALL new sockets in this process to use
+ *   the specified WiFi network, regardless of whether it has internet access.
+ *   A NetworkCallback fires immediately for already-connected WiFi and on
+ *   every subsequent WiFi availability change, keeping the binding current.
  */
 class RiftService : Service() {
 
@@ -59,13 +73,53 @@ class RiftService : Service() {
     private var multicastLock: WifiManager.MulticastLock? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
+    // ── WiFi network binding ──────────────────────────────────────────────────
+
+    private var connectivityManager: ConnectivityManager? = null
+
+    /**
+     * NetworkCallback for WiFi transport.
+     *
+     * onAvailable fires:
+     *   (a) Immediately after registerNetworkCallback if a matching WiFi
+     *       network is already active. This covers the case where the user
+     *       connected to the hotspot before launching The Rift.
+     *   (b) Whenever a new WiFi network becomes available (e.g. user connects
+     *       to the hotspot while the app is already running).
+     *
+     * onLost: we deliberately do NOT release the binding on loss. Keeping the
+     * dead binding causes Rust connection attempts to fail fast (OS detects the
+     * dead network within seconds and returns ENETDOWN), which triggers the
+     * rift_channel reconnect loop. Releasing the binding would silently reroute
+     * reconnect attempts over cellular — devices appear connected but on the
+     * wrong network, making them invisible to each other on the hotspot subnet.
+     */
+    private val wifiNetworkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            connectivityManager?.bindProcessToNetwork(network)
+            Log.i(TAG, "WiFi network available — process bound to $network (all Rust TCP → WiFi)")
+        }
+
+        override fun onLost(network: Network) {
+            // Intentionally not releasing: see class-level comment above.
+            Log.w(TAG, "WiFi network lost: $network — holding binding for fast-fail reconnect")
+        }
+
+        override fun onUnavailable() {
+            Log.w(TAG, "Requested WiFi transport unavailable on this device")
+        }
+    }
+
+    // ── Service lifecycle ─────────────────────────────────────────────────────
+
     override fun onCreate() {
         super.onCreate()
         Log.i(TAG, "Creating RiftService")
         createNotificationChannel()
         startForegroundCompat()
         acquireLocks()
-        Log.i(TAG, "RiftService online — all locks acquired")
+        bindWifiNetwork()
+        Log.i(TAG, "RiftService online — locks acquired, WiFi binding active")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -75,22 +129,83 @@ class RiftService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        Log.i(TAG, "RiftService stopping — releasing locks")
+        Log.i(TAG, "RiftService stopping — releasing locks and network binding")
         releaseLocks()
+        releaseWifiBinding()
         super.onDestroy()
+    }
+
+    // ── WiFi network binding ──────────────────────────────────────────────────
+
+    /**
+     * Registers a NetworkCallback for TRANSPORT_WIFI (no internet requirement)
+     * and immediately binds the process to any currently-active WiFi network.
+     *
+     * NET_CAPABILITY_INTERNET is deliberately omitted from the NetworkRequest.
+     * Hotspot client connections never satisfy that capability (the hotspot
+     * host has internet but the client-side network does not appear to have it
+     * from Android's perspective), so requiring it would exclude the exact
+     * networks we need to bind to.
+     */
+    private fun bindWifiNetwork() {
+        val cm = getSystemService(CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (cm == null) {
+            Log.w(TAG, "ConnectivityManager unavailable — WiFi network binding skipped")
+            return
+        }
+        connectivityManager = cm
+
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            // No NET_CAPABILITY_INTERNET: hotspot networks won't have it.
+            .build()
+
+        try {
+            cm.registerNetworkCallback(request, wifiNetworkCallback)
+            Log.i(TAG, "WiFi NetworkCallback registered")
+
+            // Immediate binding: registerNetworkCallback fires onAvailable for
+            // existing networks, but there can be a short dispatch delay on some
+            // OEM builds. Binding here covers the zero-delay path so Rust's first
+            // connection attempt (which may happen within milliseconds of service
+            // start) already uses the WiFi network.
+            val activeNet = cm.activeNetwork
+            if (activeNet != null) {
+                val caps = cm.getNetworkCapabilities(activeNet)
+                if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                    cm.bindProcessToNetwork(activeNet)
+                    Log.i(TAG, "Immediately bound to active WiFi network: $activeNet")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register WiFi network callback: ${e.message}")
+        }
+    }
+
+    /**
+     * Unregisters the NetworkCallback and releases the process-to-network
+     * binding. Called from onDestroy so there are no dangling callbacks after
+     * the service stops.
+     */
+    private fun releaseWifiBinding() {
+        try {
+            connectivityManager?.unregisterNetworkCallback(wifiNetworkCallback)
+            connectivityManager?.bindProcessToNetwork(null)
+            Log.i(TAG, "WiFi network binding released")
+        } catch (e: Exception) {
+            Log.w(TAG, "WiFi binding release failed (safe to ignore on shutdown): ${e.message}")
+        }
+        connectivityManager = null
     }
 
     // ── Notification ──────────────────────────────────────────────────────────
 
     private fun createNotificationChannel() {
-        // NotificationChannel is required from API 26 (Android 8.0).
-        // On API 24–25 this block is skipped entirely — the channel concept
-        // does not exist on those versions and notifications post directly.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "The Rift Connection",
-                NotificationManager.IMPORTANCE_LOW  // no sound, no heads-up
+                NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "Keeps The Rift connected and discoverable on the local network"
                 setShowBadge(false)
@@ -107,8 +222,6 @@ class RiftService : Service() {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
 
-        // FLAG_IMMUTABLE is required from API 31 (Android 12).
-        // FLAG_UPDATE_CURRENT is safe on all API levels.
         val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         } else {
@@ -116,40 +229,20 @@ class RiftService : Service() {
         }
         val tapPending = PendingIntent.getActivity(this, 0, tapIntent, pendingFlags)
 
-        // NotificationCompat.Builder works correctly on API 24–34+.
-        // It handles channel ID silently on API 24–25 (where channels don't
-        // exist), applies the correct defaults for each API level, and avoids
-        // the startForeground() ANR window that the platform builder can hit
-        // on low-RAM devices.
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("The Rift")
             .setContentText("Active — tap to return")
-            .setSmallIcon(R.drawable.ic_notification)  // ← bolt silhouette from drawable/
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(tapPending)
-            .setOngoing(true)           // cannot be swiped away
+            .setOngoing(true)
             .setShowWhen(false)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
     }
 
-    /**
-     * Calls startForeground() with the correct signature for the running
-     * API level.
-     *
-     * API 29+ (Android 10+): must pass the foreground service type so the
-     *   system can apply correct battery/doze/network exemptions.
-     *   ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC matches the
-     *   foregroundServiceType declared in AndroidManifest.xml.
-     *
-     * API 24–28: 2-argument form. The type concept does not exist on these
-     *   versions; passing it would throw a NoSuchMethodError at runtime.
-     */
     private fun startForegroundCompat() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // API 29+ — use ServiceCompat which correctly calls the
-            // 3-argument startForeground and handles the API 34 enforcement
-            // of the FOREGROUND_SERVICE_DATA_SYNC permission automatically.
             ServiceCompat.startForeground(
                 this,
                 NOTIFICATION_ID,
@@ -157,7 +250,6 @@ class RiftService : Service() {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
             )
         } else {
-            // API 24–28 — classic 2-argument form
             startForeground(NOTIFICATION_ID, buildNotification())
         }
     }
@@ -168,10 +260,6 @@ class RiftService : Service() {
         val wifi = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
         val power = getSystemService(POWER_SERVICE) as PowerManager
 
-        // WifiLock — WIFI_MODE_FULL_LOW_LATENCY (value 4) is available from
-        // API 12 and is the correct mode for low-latency LAN transfers.
-        // The constant itself was formally named in API 12 but the integer
-        // value 4 is stable back to API 1.
         @Suppress("DEPRECATION")
         wifiLock = wifi.createWifiLock(
             WifiManager.WIFI_MODE_FULL_LOW_LATENCY,
@@ -182,16 +270,12 @@ class RiftService : Service() {
         }
         Log.d(TAG, "WifiLock(LOW_LATENCY) acquired")
 
-        // MulticastLock — non-negotiable for mDNS on all Android versions.
         multicastLock = wifi.createMulticastLock("TheRift:MulticastLock").also {
             it.setReferenceCounted(false)
             it.acquire()
         }
         Log.d(TAG, "MulticastLock acquired")
 
-        // WakeLock — PARTIAL keeps CPU alive; screen may still turn off.
-        // This is the least aggressive wake lock that still prevents the
-        // Tokio async runtime from being suspended mid-transfer.
         @Suppress("DEPRECATION")
         wakeLock = power.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,

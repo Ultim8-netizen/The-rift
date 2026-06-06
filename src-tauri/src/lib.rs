@@ -585,6 +585,18 @@ pub fn run() {
                         }
                     });
                 }
+                {
+                    // WiFi bond maintenance: 1-second UDP pings keep the radio
+                    // active before any peer is discovered, preventing the AP's
+                    // idle-eviction timer from firing between connection events.
+                    let s = state_clone.clone();
+                    let a = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = network::start_bond_keeper(s, a).await {
+                            eprintln!("[BondKeeper] Fatal: {e}");
+                        }
+                    });
+                }
 
                 #[cfg(not(target_os = "android"))]
                 {

@@ -23,8 +23,12 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 pub const RIFT_CHANNEL_PORT: u16 = 7475;
-const PING_INTERVAL: Duration = Duration::from_secs(2);
-const PEER_TIMEOUT: Duration = Duration::from_secs(10);
+/// 1.5 s: more frequent keepalive frames prevent the AP's idle-eviction timer
+/// from firing (shortest observed: 8 s) while still being lighter than 1 s.
+const PING_INTERVAL: Duration = Duration::from_millis(1500);
+/// 6 s: 4 missed PINGs before we declare the peer dead and reconnect.
+/// Down from 10 s — faster reconnect after a hotspot radio hiccup.
+const PEER_TIMEOUT: Duration = Duration::from_secs(6);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_RETRIES: u8 = 12; // 1 min total before giving up
@@ -50,6 +54,9 @@ pub async fn start_channel_server(state: SharedState, app: AppHandle) -> anyhow:
 }
 
 async fn serve_channel(stream: TcpStream, state: SharedState, app: AppHandle) {
+    // OS-level dead-peer detection: RST within ~11 s of link dying,
+    // rather than waiting for the next write to fail (hours without this).
+    crate::network::apply_tcp_keepalive(&stream);
     let (read_half, mut writer) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();
@@ -156,6 +163,7 @@ async fn run_client(
     state: SharedState,
     app: AppHandle,
 ) {
+    crate::network::apply_tcp_keepalive(&stream);
     let (read_half, mut writer) = stream.into_split();
     let mut reader = BufReader::new(read_half);
     let mut line = String::new();

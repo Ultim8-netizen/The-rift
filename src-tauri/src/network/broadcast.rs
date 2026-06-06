@@ -1,11 +1,14 @@
 //! UDP broadcast presence — a second discovery path that works when mDNS multicast
 //! is blocked by a firewall, dropped by the router, or suppressed by the OS.
 //!
-//! Every ANNOUNCE_INTERVAL seconds every instance broadcasts:
-//!   "RIFT|{id}|{name}|{port}|{os}"  → 255.255.255.255:7476
+//! Adaptive announce interval:
+//!   • ANNOUNCE_INTERVAL_FAST (2 s) — when no peers in state: aggressive mode
+//!     so newly powered-on peers are heard within 2 s rather than 8 s.
+//!   • ANNOUNCE_INTERVAL_SLOW (8 s) — once peers exist: maintenance mode,
+//!     reduces radio duty cycle during active transfers.
 //!
 //! Every instance also listens and upserts any peer it hears, then tries to open
-//! a rift channel with it.  The sender fires once immediately on startup so
+//! a rift channel with it. The sender fires once immediately on startup so
 //! already-running peers on the subnet hear us without waiting for the first interval.
 
 use super::rift_channel;
@@ -17,7 +20,11 @@ use tauri::{AppHandle, Emitter};
 use tokio::net::UdpSocket;
 
 pub const BROADCAST_PORT: u16 = 7476;
-const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(8);
+
+/// When no peers are in state — aggressive re-announce to catch peers that just started.
+const ANNOUNCE_INTERVAL_FAST: Duration = Duration::from_secs(2);
+/// When at least one peer is active — maintenance cadence, reduces radio load.
+const ANNOUNCE_INTERVAL_SLOW: Duration = Duration::from_secs(8);
 
 fn build_packet(id: &str, name: &str, port: u16, os: &str) -> Vec<u8> {
     format!("RIFT|{id}|{name}|{port}|{os}").into_bytes()
@@ -65,13 +72,23 @@ pub async fn start_broadcast_discovery(
 
     // ── Sender ───────────────────────────────────────────────────────────────
     {
-        let sock   = socket.clone();
-        let pkt    = packet.clone();
-        let dest_c = dest;
+        let sock    = socket.clone();
+        let pkt     = packet.clone();
+        let dest_c  = dest;
+        let state_c = state.clone(); // cloned separately — receiver takes the original
         tokio::spawn(async move {
             loop {
                 let _ = sock.send_to(&pkt, dest_c).await;
-                tokio::time::sleep(ANNOUNCE_INTERVAL).await;
+
+                // Adaptive interval: be loud when the subnet is quiet so newly
+                // powered-on peers (or peers recovering from a hotspot drop) hear
+                // us within 2 s. Once a peer is confirmed, back off to 8 s.
+                let interval = if state_c.lock().await.devices.is_empty() {
+                    ANNOUNCE_INTERVAL_FAST
+                } else {
+                    ANNOUNCE_INTERVAL_SLOW
+                };
+                tokio::time::sleep(interval).await;
             }
         });
     }
@@ -145,6 +162,6 @@ pub async fn start_broadcast_discovery(
         });
     }
 
-    eprintln!("[Broadcast] UDP presence active on :{BROADCAST_PORT}");
+    eprintln!("[Broadcast] UDP presence active on :{BROADCAST_PORT} (adaptive interval 2/8 s)");
     Ok(())
 }
