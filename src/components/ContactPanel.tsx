@@ -111,12 +111,6 @@ export function ContactPanel({ onClose }: Props) {
               >
                 Call
               </button>
-              <button
-                onClick={() => openExternal(`sms:${PHONE_E164}`)}
-                className="flex-1 py-2 text-[10px] font-mono btn-ghost"
-              >
-                SMS
-              </button>
             </div>
           </div>
 

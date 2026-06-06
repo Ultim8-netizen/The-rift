@@ -20,6 +20,14 @@ class MainActivity : TauriActivity() {
         super.onCreate(savedInstanceState)
         Log.i(TAG, "MainActivity created — API ${Build.VERSION.SDK_INT}")
 
+        // Repair icon alias state immediately on launch, before any other
+        // initialisation. Enforces exactly one enabled alias, recovering from
+        // any crash that left two aliases enabled in a prior session.
+        // Runs on a background thread — PackageManager IPC must not block the
+        // main thread. The repair completes within a few hundred milliseconds,
+        // well before the user can navigate back to the launcher.
+        Thread { IconSwitcher.repairOnStartup(applicationContext) }.start()
+
         RiftAndroidHelper.init(this)
 
         // Register the file picker launcher before the activity reaches STARTED
