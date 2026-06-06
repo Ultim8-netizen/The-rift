@@ -26,29 +26,46 @@ async fn get_app_state(state: State<'_, SharedState>) -> Result<AppStatePayload,
     })
 }
 
+/// Launches the native file picker on Android and returns staged files ready
+/// for transfer. Files are copied to the app's private cache directory inside
+/// the activity result callback — while the URI grant is live — before this
+/// command returns. No content:// URI ever reaches Rust.
+///
+/// On non-Android platforms this command returns an Err with a sentinel value
+/// ("USE_DIALOG_PLUGIN") that the frontend uses to fall back to the existing
+/// tauri-plugin-dialog + get_file_metadata flow.
+#[tauri::command]
+async fn pick_files_for_send() -> Result<Vec<StagedFile>, String> {
+    #[cfg(target_os = "android")]
+    {
+        let picked = android_fs::trigger_android_picker()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let staged: Vec<StagedFile> = picked
+            .into_iter()
+            .map(|f| StagedFile {
+                name: f.name,
+                path: f.path,
+                size_bytes: f.size,
+            })
+            .collect();
+
+        Ok(staged)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        // Tell the frontend to use its existing dialog-plugin path.
+        Err("USE_DIALOG_PLUGIN".to_string())
+    }
+}
+
 /// Returns file metadata for the given paths.
-///
-/// ── Android fix ──────────────────────────────────────────────────────────────
-/// The old implementation called `android_fs::get_file_info` which queries
-/// ContentResolver's `SIZE` column.  That column is `null` for the overwhelming
-/// majority of `content://` URIs returned by the Android file picker, so every
-/// file appeared as 0 bytes in the staging UI.
-///
-/// Worse: it preserved the raw `content://` URI as `StagedFile.path`.  The
-/// file-picker Intent's URI grant is only guaranteed valid *immediately* after
-/// the picker returns.  By the time the user reviews staging and taps Send,
-/// that ephemeral grant is frequently expired.  `copyUriToCache` then fails,
-/// `resolve_paths` returns `Err`, `send_files` returns `Err` to the frontend
-/// *before* `transfer_started` is emitted — the dialogue dismissed via the
-/// invoke-rejection path and nothing ever reached the remote device.
-///
-/// Fix: call `resolve_paths` here (which runs `android_copy_uri` for
-/// `content://` URIs) while the grant is still live.  The file is copied to
-/// the app's private cache directory once; subsequent calls in `send_files`
-/// receive a plain file path and need only `stat` it — no URI, no grant.
-///
-/// On desktop `resolve_paths` is a plain `tokio::fs::metadata` call, so
-/// desktop behaviour is unchanged.
+/// On Android, paths must be plain filesystem paths (not content:// URIs).
+/// In the new architecture, content:// URIs never reach this command —
+/// RiftFilePicker copies them to cache and returns plain paths via
+/// pick_files_for_send.
 #[tauri::command]
 async fn get_file_metadata(paths: Vec<String>) -> Result<Vec<StagedFile>, String> {
     let mut out = Vec::with_capacity(paths.len());
@@ -63,16 +80,6 @@ async fn get_file_metadata(paths: Vec<String>) -> Result<Vec<StagedFile>, String
                 });
             }
             _ => {
-                #[cfg(target_os = "android")]
-                if path.starts_with("content://") {
-                    return Err(
-                        "Could not read the selected file. \
-                         Storage permission may be missing, or the file comes from a \
-                         cloud provider that has not downloaded it yet. \
-                         Try selecting the file again, or move it to local storage first."
-                            .to_string(),
-                    );
-                }
                 let name = std::path::Path::new(&path)
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -124,10 +131,6 @@ async fn rescan(
         }
     });
 
-    // Subnet scan is desktop-only. On Android the /24 probe saturates the
-    // Tokio I/O driver at startup and can trigger AP rate-limiting. mDNS and
-    // UDP broadcast (already running) are the correct discovery mechanisms
-    // on mobile and cover the same devices without the scan cost.
     #[cfg(not(target_os = "android"))]
     {
         let s2 = state.inner().clone();
@@ -165,24 +168,12 @@ async fn send_files(
     };
 
     let resolved = android_fs::resolve_paths(&file_paths).await.map_err(|e| {
-        eprintln!("[Send] URI resolution failed: {e}");
+        eprintln!("[Send] Path resolution failed: {e}");
         e.to_string()
     })?;
 
-    // ── Temp-path cleanup ────────────────────────────────────────────────────
-    // Two sources of temporary cache files that must be removed after transfer:
-    //
-    //   1. Files copied to cache *right now* by resolve_paths (content:// URIs
-    //      that somehow bypassed get_file_metadata).  These have temp_path set.
-    //
-    //   2. Files pre-staged into cache by get_file_metadata (the normal Android
-    //      path).  resolve_paths treats them as plain files (temp_path = None),
-    //      but they are identifiable by the "rift_send_" filename prefix that
-    //      android_copy_uri always uses.
-    //
-    // On non-Android builds the cfg block below is never compiled, so `mut` is
-    // not exercised. The allow attribute suppresses the resulting lint without
-    // changing behaviour on any platform.
+    // On Android, file_paths contains pre-copied cache paths from pick_files_for_send.
+    // The rift_send_ prefix identifies them so they can be cleaned up after transfer.
     #[allow(unused_mut)]
     let mut temp_paths: Vec<Option<String>> = resolved.iter().map(|r| r.temp_path.clone()).collect();
 
@@ -210,7 +201,6 @@ async fn send_files(
 
     let transfer_id = uuid::Uuid::new_v4().to_string();
 
-    // ── Emit transfer_started so the sender sees their own transfer ──────────
     {
         let total_bytes: u64 = files.iter().map(|f| f.size_bytes).sum();
         let files_json: Vec<serde_json::Value> = files
@@ -245,13 +235,11 @@ async fn send_files(
         );
     }
 
-    // Capture target address before `target` is moved into send_files_to_device.
     let target_ip   = target.ip.clone();
     let target_port = target.port;
-
     let state_clone = state.inner().clone();
-    let app_clone = app.clone();
-    let tid = transfer_id.clone();
+    let app_clone   = app.clone();
+    let tid         = transfer_id.clone();
 
     tauri::async_runtime::spawn(async move {
         let result = transfer::send_files_to_device(
@@ -263,7 +251,6 @@ async fn send_files(
         )
         .await;
 
-        // Clean up all temp/pre-staged cache files regardless of outcome.
         for temp in &temp_paths {
             if let Some(p) = temp {
                 if let Err(e) = tokio::fs::remove_file(p).await {
@@ -476,42 +463,6 @@ async fn detect_hotspot(state: State<'_, SharedState>) -> Result<HotspotInfo, St
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // ── Android: dynamic Tokio runtime configuration ──────────────────────────
-    // Must be called before Builder::default(). All tauri::async_runtime::spawn
-    // calls for the lifetime of the app inherit this runtime.
-    //
-    // worker_threads: half of available logical CPUs, floored at 2. Prevents
-    // Tokio from saturating all cores and starving the render thread under
-    // transfer load. available_parallelism already reflects parked efficiency
-    // cores under thermal throttling, so the value is always current.
-    //
-    //   2-core  device: 2 workers  (floor applied)
-    //   4-core  device: 2 workers
-    //   6-core  device: 3 workers
-    //   8-core  device: 4 workers
-    //   10-core device: 5 workers
-    //
-    // max_blocking_threads: caps the spawn_blocking pool at 16. The default of
-    // 512 is a desktop assumption; 16 is more than sufficient for concurrent
-    // file copies and prevents runaway thread spawning on slow storage I/O.
-    //
-    // thread_stack_size: reduces worker stacks from 2MB to 512KB. Async I/O
-    // tasks have shallow call stacks; the full 2MB is never touched, but the
-    // kernel reserves it as virtual address space regardless. Saves ~3MB RSS
-    // per worker pair on a 4-core device.
-    //
-    // thread_keep_alive: retained at the standard 10s. Blocking threads
-    // spawned for file copies must remain available for back-to-back transfers
-    // without paying re-spawn cost between them. 10s covers typical multi-file
-    // transfer sessions where the user selects another batch immediately after
-    // the first completes.
-    //
-    // Runtime lifetime: tauri::async_runtime::set() requires a TokioHandle,
-    // not the Runtime itself. The runtime must remain alive for the full
-    // process lifetime — dropping it would invalidate the handle and panic on
-    // the first spawn. Box::leak transfers ownership to the heap permanently,
-    // which is the correct pattern here since the runtime must outlive Tauri's
-    // builder and all spawned tasks.
     #[cfg(target_os = "android")]
     {
         let logical_cores = std::thread::available_parallelism()
@@ -532,9 +483,6 @@ pub fn run() {
             .build()
             .expect("[Runtime] Failed to build Tokio runtime");
 
-        // Extract the handle before leaking the runtime. The handle remains
-        // valid for the full process lifetime because Box::leak ensures the
-        // runtime is never dropped.
         let handle = rt.handle().clone();
         Box::leak(Box::new(rt));
         tauri::async_runtime::set(handle);
@@ -543,6 +491,7 @@ pub fn run() {
     let shared_state = new_shared_state();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_os::init())       // ← added
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -551,6 +500,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_app_state,
             get_file_metadata,
+            pick_files_for_send,
             start_discovery,
             rescan,
             send_files,
@@ -582,10 +532,6 @@ pub fn run() {
                     })
                     .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
 
-                // Captive portal is desktop-only. On Android writing to
-                // /etc/hosts requires root and the redirect server serves no
-                // purpose; skipping it avoids an idle port listener for the
-                // entire session.
                 #[cfg(not(target_os = "android"))]
                 let _ = network::captive::start_captive_portal(our_ip).await;
 
@@ -603,7 +549,6 @@ pub fn run() {
                         }
                     });
                 }
-
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -613,7 +558,6 @@ pub fn run() {
                         }
                     });
                 }
-
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -623,7 +567,6 @@ pub fn run() {
                         }
                     });
                 }
-
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -633,7 +576,6 @@ pub fn run() {
                         }
                     });
                 }
-
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
@@ -644,11 +586,6 @@ pub fn run() {
                     });
                 }
 
-                // Subnet scan is desktop-only. On Android probing up to 255
-                // addresses saturates the Tokio I/O driver at startup and can
-                // trigger AP rate-limiting. mDNS and UDP broadcast (already
-                // running above) cover the same devices on mobile without the
-                // scan cost.
                 #[cfg(not(target_os = "android"))]
                 {
                     let s = state_clone.clone();
@@ -665,15 +602,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("The Rift failed to start")
         .run(|_app, event| {
-            // Hosts file cleanup is desktop-only. On Android the write has no
-            // effect without root; skipping block_on here makes the exit path
-            // instantaneous on mobile instead of awaiting a doomed syscall.
             #[cfg(not(target_os = "android"))]
             if let tauri::RunEvent::Exit = event {
                 tauri::async_runtime::block_on(network::captive::cleanup_hosts_file());
             }
-            // Suppress unused variable warning on Android where the cfg gate
-            // above means `event` is never read.
             #[cfg(target_os = "android")]
             let _ = event;
         });

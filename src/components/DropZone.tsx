@@ -5,6 +5,7 @@ import { useTransferActions } from "@/hooks/useTransfer";
 import { useInvoke } from "@/hooks/useTauri";
 import { type StagedFile } from "@/types";
 import { open } from "@tauri-apps/plugin-dialog";
+import { platform } from "@tauri-apps/plugin-os";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { fmt, expandToPaths } from "@/utils/fileHelpers";
 import { Portal3D } from "./Portal3D";
@@ -42,6 +43,15 @@ export function DropZone() {
 
   async function browse() {
     try {
+      // On Android the picker and content:// → cache copy happen atomically
+      // inside the Kotlin command so the returned StagedFile list is already
+      // safe to use directly — no separate get_file_metadata call needed.
+      if (await platform() === "android") {
+        const files = await call<StagedFile[]>("pick_files_for_send");
+        setStagedFiles(files);
+        return;
+      }
+      // Desktop: unchanged path.
       const res = await open({ multiple: true, directory: false });
       if (!res) return;
       await stageFromPaths(Array.isArray(res) ? res : [res]);

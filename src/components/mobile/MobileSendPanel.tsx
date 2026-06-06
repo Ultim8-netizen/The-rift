@@ -6,6 +6,7 @@ import { useInvoke } from "@/hooks/useTauri";
 import { Portal3D } from "@/components/Portal3D";
 import { type StagedFile } from "@/types";
 import { open } from "@tauri-apps/plugin-dialog";
+import { platform } from "@tauri-apps/plugin-os";
 import { fmt, expandToPaths } from "@/utils/fileHelpers";
 
 type TextStatus = "idle" | "sending" | "sent" | "error";
@@ -43,13 +44,22 @@ export function MobileSendPanel() {
     setStageError(null);
     setSendError(null);
     try {
+      // On Android the picker and content:// → cache copy happen atomically
+      // inside the Kotlin command so the returned StagedFile list is already
+      // safe to use directly — no separate get_file_metadata call needed.
+      if (await platform() === "android") {
+        const files = await call<StagedFile[]>("pick_files_for_send");
+        setStagedFiles(files);
+        return;
+      }
+      // Desktop: unchanged path.
       const res = await open({ multiple: true, directory: false });
       if (!res) return;
       await stageFromPaths(Array.isArray(res) ? res : [res]);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setStageError(msg);
-      console.error("[MobileSendPanel] stageFromPaths error:", e);
+      console.error("[MobileSendPanel] browse error:", e);
     }
   }
 

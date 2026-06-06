@@ -21,6 +21,11 @@ class MainActivity : TauriActivity() {
         Log.i(TAG, "MainActivity created — API ${Build.VERSION.SDK_INT}")
 
         RiftAndroidHelper.init(this)
+
+        // Register the file picker launcher before the activity reaches STARTED
+        // state. ActivityResultLauncher has a hard requirement on this ordering.
+        RiftFilePicker.register(this)
+
         handlePermissionsAndStartService()
     }
 
@@ -29,25 +34,12 @@ class MainActivity : TauriActivity() {
         RiftAndroidHelper.updateActivity(this)
     }
 
-    /**
-     * Called whenever the activity leaves the foreground (home press, back, screen off, etc.).
-     */
     override fun onStop() {
         super.onStop()
-        // REMOVED: IconSwitcher call was here.
-        // Calling setComponentEnabledSetting(current_alias, DISABLED) from onStop()
-        // disables the active launcher alias while the process is still live.
-        // On Transsion OEM (and likely others), this triggers MainActivity.onDestroy()
-        // even with DONT_KILL_APP, which Tauri interprets as app termination → exit(0).
-        // The file picker opened via startActivityForResult has no process to return to.
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        // Safe here: the app is genuinely ending. setComponentEnabledSetting on the
-        // now-dead launcher alias cannot disrupt anything. The background thread may
-        // or may not complete before Tauri's exit(0) fires, but either outcome is
-        // acceptable since the process is already shutting down.
         Thread { IconSwitcher.switchRandom(applicationContext) }.start()
     }
 

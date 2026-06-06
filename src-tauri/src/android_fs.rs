@@ -1,150 +1,272 @@
-//! Platform-aware file info and path resolver.
+//! Platform-aware file path resolver and Android file picker bridge.
 //!
-//! Android file pickers return `content://` URIs. The Rust layer cannot open
-//! these directly — the kernel has no ContentResolver. This module resolves
-//! them to real file paths Rust can `File::open`.
+//! ── Architecture (new) ───────────────────────────────────────────────────────
+//! The previous implementation attempted to copy content:// URIs from a Tokio
+//! blocking thread via JNI, long after the URI grant had been delivered via
+//! Tauri's async IPC pipeline. This failed consistently on OEM Android builds
+//! (TECNO/Transsion, Samsung, MIUI) because those ROMs enforce stricter URI
+//! permission checks tied to the Activity component that received onActivityResult,
+//! not the process-wide ApplicationContext.
 //!
-//! ── Android JVM initialisation ────────────────────────────────────────────
-//! The previous implementation called `ndk_context::android_context().vm()`
-//! to obtain the JavaVM pointer.  This caused a fatal SIGABRT with the
-//! message "android context was not initialized" the first time a file was
-//! selected, because `ndk_context` stores its state in process-global statics
-//! that are private to whichever .so called `initialize_android_context`.
-//! Tauri initialises its own copy; our cdylib has a separate copy that is
-//! never seeded.
+//! The replacement: RiftFilePicker.kt owns the entire picker lifecycle. It copies
+//! file bytes to cache inside the activity result callback — while the grant is
+//! unambiguously live — then signals this module via nativeOnFilesSelected. Rust
+//! only ever receives plain absolute cache paths. No URI, no grant, no OEM gap.
 //!
-//! Fix: `RiftAndroidHelper.init()` in Kotlin calls the JNI function
-//! `nativeInitJvm()`, whose Rust implementation stores the `JavaVM` in our
-//! own `OnceLock`.  All subsequent JNI calls on any Tokio thread use that
-//! stored pointer instead of ndk_context.  The `ndk-context` crate remains
-//! in Cargo.toml as a transitive dependency of Tauri but is no longer used
-//! directly from this file.
+//! ── JVM initialisation (unchanged) ──────────────────────────────────────────
+//! RiftAndroidHelper.nativeInitJvm() stores the JavaVM pointer in JVM_GLOBAL.
+//! This is still required so trigger_android_picker() can call back into Kotlin
+//! via with_jni().
 //!
-//! ── Android JNI class-loading fix ─────────────────────────────────────────
-//! `JNIEnv::FindClass` in Android uses the class loader of the CALLING
-//! THREAD's top Java stack frame.  Tokio blocking threads that were attached
-//! via `attach_current_thread()` have no Java frames on their stack, so the
-//! JVM falls back to the BOOTSTRAP class loader — which knows JDK built-ins
-//! but has never heard of app classes such as
-//! `com.abyssprotocol.therift.RiftAndroidHelper`.
-//!
-//! Consequence: `env.find_class("com/abyssprotocol/therift/RiftAndroidHelper")`
-//! silently returned `Err` on every Tokio worker call.  `copyUriToCache` and
-//! `queryUriInfo` were never reached.  `android_copy_uri` returned `Err`, and
-//! `get_file_metadata` fell through to its 0-byte stub, preserving the raw
-//! `content://` URI as the staged path.  When `send_files` later tried to
-//! re-resolve that URI (possibly after the ephemeral grant had expired), it
-//! also returned `Err`, and nothing was ever sent.
-//!
-//! Fix: `nativeInitJvm` now caches the `RiftAndroidHelper` class as a JNI
-//! `GlobalRef` while still on the MAIN THREAD (where the app class loader is
-//! active).  All subsequent calls from worker threads obtain a `JClass` via
-//! `JClass::from_raw(class_ref.as_raw())` — `FindClass` is never called again,
-//! bypassing the classloader trap entirely.
-//! ─────────────────────────────────────────────────────────────────────────
+//! ── Classloader fix (unchanged mechanism, new target) ────────────────────────
+//! FindClass from a Tokio worker thread uses the bootstrap classloader and cannot
+//! find app classes. RiftFilePicker.nativeRegisterPickerClass() stores a GlobalRef
+//! to RiftFilePicker on the main thread (where the app classloader is active).
+//! trigger_android_picker() uses JClass::from_raw(PICKER_CLASS.get()) to call
+//! RiftFilePicker.pickFiles() without ever calling FindClass again.
 
 #[cfg(target_os = "android")]
 use std::sync::OnceLock;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
+/// A file resolved to a path that tokio::fs::File::open can open.
 pub struct ResolvedFile {
-    /// Display name to use as the file name on the receiving device.
-    pub name: String,
-    /// A path that `tokio::fs::File::open` can open successfully.
+    pub name:      String,
     pub real_path: String,
-    /// Byte count (from cache file after copy, or from fs::metadata on
-    /// non-Android).
-    pub size: u64,
-    /// Absolute path of the temp cache copy we created, if any.
-    /// The caller MUST delete this file after the transfer completes.
+    pub size:      u64,
+    /// Absolute path of the temp cache copy, if one was created.
+    /// Caller must delete after transfer completes.
     pub temp_path: Option<String>,
 }
 
-// ── Android static singletons ─────────────────────────────────────────────────
+/// A file produced by the Android picker — already copied to cache.
+#[cfg(target_os = "android")]
+pub struct PickedFile {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+}
 
-/// JavaVM pointer seeded by `nativeInitJvm`; used by all worker threads to
-/// attach and make JNI calls.
+// ── Android statics ───────────────────────────────────────────────────────────
+
+/// JavaVM pointer — seeded by nativeInitJvm (called from RiftAndroidHelper.init).
+/// Used by with_jni() to attach any thread to the VM.
 #[cfg(target_os = "android")]
 static JVM_GLOBAL: OnceLock<jni::JavaVM> = OnceLock::new();
 
-/// Cached `GlobalRef` to `com.abyssprotocol.therift.RiftAndroidHelper`.
-///
-/// Must be set on the MAIN THREAD (inside `nativeInitJvm`) where the app
-/// class loader is active.  Worker threads then call
-/// `JClass::from_raw(HELPER_CLASS.get().unwrap().as_raw())` to obtain a
-/// usable `JClass` without ever invoking `FindClass`.
-///
-/// `GlobalRef` is `Send + Sync` — safe to store in a process-wide static.
+/// GlobalRef to com.abyssprotocol.therift.RiftFilePicker.
+/// Seeded by nativeRegisterPickerClass on the main thread.
+/// Used by trigger_android_picker() to call RiftFilePicker.pickFiles().
 #[cfg(target_os = "android")]
-static HELPER_CLASS: OnceLock<jni::objects::GlobalRef> = OnceLock::new();
+static PICKER_CLASS: OnceLock<jni::objects::GlobalRef> = OnceLock::new();
 
-// ── JNI export: nativeInitJvm ────────────────────────────────────────────────
+/// Oneshot sender side for the current in-progress pick operation.
+/// Set by trigger_android_picker() before calling Kotlin.
+/// Consumed by nativeOnFilesSelected() when Kotlin reports results.
+//
+// FIX 1: was `OnceLock;` — the semicolon was a spurious replacement for `<`.
+#[cfg(target_os = "android")]
+static PICK_SENDER: OnceLock<
+    std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Vec<PickedFile>>>>,
+> = OnceLock::new();
 
-/// Called from Kotlin as `RiftAndroidHelper.nativeInitJvm()`.
+// ── JNI exports: called from RiftAndroidHelper ───────────────────────────────
+
+/// Called from Kotlin: RiftAndroidHelper.nativeInitJvm()
+/// Stores the JavaVM pointer and caches the RiftAndroidHelper class GlobalRef.
+/// Must run on the main thread so the app classloader is active.
 ///
-/// Stores the `JavaVM` pointer AND caches a `GlobalRef` to the
-/// `RiftAndroidHelper` class.  Both operations MUST happen here — on the
-/// main thread, via the JNIEnv passed by the JVM — because:
-///   • `get_java_vm()` extracts the VM from the current env (no class loading).
-///   • `new_global_ref(class_param)` uses `class_param`, which the JVM already
-///     resolved with the correct app class loader before dispatching the call.
-///     Calling `find_class` from a worker thread later would use the bootstrap
-///     loader instead, silently failing to find app classes.
-///
-/// `class_param` is the second argument of every static JNI method — the JVM
-/// passes the declaring class itself, which IS `RiftAndroidHelper`.
+/// Note: HELPER_CLASS was removed in this revision — the old JNI copy path
+/// (copyUriToCache via RiftAndroidHelper) has been replaced by RiftFilePicker.
+/// JVM_GLOBAL is kept because with_jni() is still used by trigger_android_picker.
+//
+// FIX 2: was missing `<` before `'local,` — the lifetime generic bracket was dropped.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_nativeInitJvm<'local>(
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_nativeInitJvm<
+    'local,
+>(
     mut env: jni::JNIEnv<'local>,
-    class_param: jni::objects::JClass<'local>,
+    _class_param: jni::objects::JClass<'local>,
 ) {
-    // ── 1. Store the JavaVM pointer ───────────────────────────────────────────
     match env.get_java_vm() {
         Ok(vm) => {
             if JVM_GLOBAL.set(vm).is_ok() {
-                eprintln!("[AndroidFS] JavaVM stored — JNI file ops enabled");
+                eprintln!("[AndroidFS] JavaVM stored");
             }
-            // Err means already set (Activity recreation) — that is fine.
         }
-        Err(e) => {
-            eprintln!("[AndroidFS] get_java_vm failed: {e:?}");
-        }
+        Err(e) => eprintln!("[AndroidFS] get_java_vm failed: {e:?}"),
     }
+}
 
-    // ── 2. Cache the RiftAndroidHelper class as a GlobalRef ───────────────────
-    // Converting to a GlobalRef prevents the JVM from GC-ing the class object
-    // and allows worker threads to reference it without FindClass.
+// ── JNI exports: called from RiftFilePicker ───────────────────────────────────
+
+/// Called from Kotlin: RiftFilePicker.nativeRegisterPickerClass()
+/// Caches a GlobalRef to RiftFilePicker so worker threads can call its static
+/// methods without invoking FindClass (which would use the bootstrap loader).
+/// Must run on the main thread — called from RiftFilePicker.register().
+//
+// FIX 3: was missing `<` before `'local,` — same dropped bracket as above.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeRegisterPickerClass<
+    'local,
+>(
+    mut env: jni::JNIEnv<'local>,
+    class_param: jni::objects::JClass<'local>,
+) {
     match env.new_global_ref(class_param) {
         Ok(global_ref) => {
-            if HELPER_CLASS.set(global_ref).is_ok() {
-                eprintln!(
-                    "[AndroidFS] RiftAndroidHelper cached as GlobalRef \
-                     — classloader fix active"
-                );
+            if PICKER_CLASS.set(global_ref).is_ok() {
+                eprintln!("[FilePicker] RiftFilePicker cached as GlobalRef");
             }
-            // Err means already set (Activity recreation) — that is fine.
         }
-        Err(e) => {
-            eprintln!(
-                "[AndroidFS] new_global_ref(RiftAndroidHelper) failed: {e:?} \
-                 — file ops WILL FAIL on worker threads"
-            );
+        Err(e) => eprintln!("[FilePicker] new_global_ref(RiftFilePicker) failed: {e:?}"),
+    }
+}
+
+/// Called from Kotlin: RiftFilePicker.nativeOnFilesSelected(paths: Array<String>)
+/// Each element of `paths` is "displayName\nabsolutePath\nsizeBytes".
+/// An empty array signals cancellation or complete failure.
+/// Signals the waiting trigger_android_picker() via the PICK_SENDER oneshot.
+//
+// FIX 4: was missing `<` before `'local,` — same dropped bracket as above.
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeOnFilesSelected<
+    'local,
+>(
+    mut env: jni::JNIEnv<'local>,
+    _class: jni::objects::JClass<'local>,
+    paths: jni::objects::JObjectArray<'local>,
+) {
+    let len = env.get_array_length(&paths).unwrap_or(0);
+    let mut picked: Vec<PickedFile> = Vec::with_capacity(len as usize);
+
+    for i in 0..len {
+        let elem = match env.get_object_array_element(&paths, i) {
+            Ok(o) if !o.is_null() => o,
+            _ => continue,
+        };
+        let jstr = jni::objects::JString::from(elem);
+        let s: String = match env.get_string(&jstr) {
+            Ok(s) => s.into(),
+            Err(_) => continue,
+        };
+
+        // Format: "displayName\nabsolutePath\nsizeBytes"
+        let mut parts = s.splitn(3, '\n');
+        let name = match parts.next() {
+            Some(n) if !n.is_empty() => n.to_string(),
+            _ => continue,
+        };
+        let path = match parts.next() {
+            Some(p) if !p.is_empty() => p.to_string(),
+            _ => continue,
+        };
+        let size: u64 = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+
+        picked.push(PickedFile { name, path, size });
+    }
+
+    eprintln!("[FilePicker] nativeOnFilesSelected: {} file(s)", picked.len());
+
+    // Signal the waiting trigger_android_picker() future.
+    let mutex = PICK_SENDER.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(mut guard) = mutex.lock() {
+        if let Some(tx) = guard.take() {
+            let _ = tx.send(picked);
+        } else {
+            eprintln!("[FilePicker] nativeOnFilesSelected: no waiting sender (spurious call?)");
         }
     }
 }
 
-// ── resolve_paths (async) ─────────────────────────────────────────────────────
+// ── Public API: Android file picker ──────────────────────────────────────────
 
-/// Resolves every path in `paths` to a `ResolvedFile`.
+/// Launches the Android file picker via Kotlin and waits for the user to
+/// complete the selection (or cancel).
 ///
-/// For Android `content://` URIs: copies the file to the app cache directory
-/// via JNI → ContentResolver. The temp file path is returned in
-/// `ResolvedFile::temp_path`; the caller must delete it after transfer.
+/// The entire copy-to-cache operation happens inside RiftFilePicker before
+/// this future resolves. The returned PickedFile structs contain plain absolute
+/// paths that tokio::fs::File::open can open without any URI or permission logic.
 ///
-/// For regular file system paths (all platforms): returns the path unchanged
-/// with no temp file created.
+/// Returns an empty Vec if the user cancelled.
+/// Returns Err on setup failure (class not registered, already in progress, etc.).
+#[cfg(target_os = "android")]
+pub async fn trigger_android_picker() -> anyhow::Result<Vec<PickedFile>> {
+    use tokio::sync::oneshot;
+
+    let (tx, rx) = oneshot::channel::<Vec<PickedFile>>();
+
+    // Register the sender before calling Kotlin — the callback could fire before
+    // trigger_android_picker returns on a fast device.
+    {
+        let mutex = PICK_SENDER.get_or_init(|| std::sync::Mutex::new(None));
+        let mut guard = mutex
+            .lock()
+            .map_err(|_| anyhow::anyhow!("PICK_SENDER mutex poisoned"))?;
+        if guard.is_some() {
+            anyhow::bail!(
+                "A file picker is already open. \
+                 Complete or cancel the current selection before starting a new one."
+            );
+        }
+        *guard = Some(tx);
+    }
+
+    // Call RiftFilePicker.pickFiles() via JNI.
+    // RiftFilePicker.pickFiles() posts to the main thread Handler and returns
+    // immediately — it does not block.
+    let jni_result = with_jni(|env| {
+        let class_ref = PICKER_CLASS.get().ok_or_else(|| {
+            anyhow::anyhow!(
+                "RiftFilePicker class GlobalRef not registered. \
+                 Ensure RiftFilePicker.register(this) is called from \
+                 MainActivity.onCreate() before the activity starts."
+            )
+        })?;
+
+        // SAFETY: PICKER_CLASS holds a JNI global reference for the process
+        // lifetime. JClass::from_raw creates a thin wrapper over the same object;
+        // valid for the duration of this JNI call frame.
+        let class = unsafe { jni::objects::JClass::from_raw(class_ref.as_raw()) };
+
+        env.call_static_method(&class, "pickFiles", "()V", &[])
+            .map_err(|e| {
+                let _ = env.exception_clear();
+                anyhow::anyhow!("RiftFilePicker.pickFiles() JNI failed: {e:?}")
+            })?;
+
+        Ok(())
+    });
+
+    // If the JNI call itself failed, clean up the sender so the next call works.
+    if let Err(e) = jni_result {
+        let mutex = PICK_SENDER.get_or_init(|| std::sync::Mutex::new(None));
+        if let Ok(mut guard) = mutex.lock() {
+            guard.take();
+        }
+        return Err(e);
+    }
+
+    // Wait for nativeOnFilesSelected to signal completion.
+    // 5-minute timeout: generous enough for manual file browsing but prevents
+    // an indefinite hang if the callback is never fired due to a system bug.
+    tokio::time::timeout(std::time::Duration::from_secs(300), rx)
+        .await
+        .map_err(|_| anyhow::anyhow!("File picker timed out after 5 minutes"))?
+        .map_err(|_| anyhow::anyhow!("File picker result channel dropped unexpectedly"))
+}
+
+// ── resolve_paths: used by send_files ────────────────────────────────────────
+
+/// Resolves each path to a ResolvedFile for the transfer layer.
+///
+/// In the new architecture, all paths arriving here are plain absolute cache
+/// paths (pre-copied by RiftFilePicker on Android, or direct filesystem paths
+/// on desktop). No content:// URI handling is needed or attempted.
 pub async fn resolve_paths(paths: &[String]) -> anyhow::Result<Vec<ResolvedFile>> {
     let mut out = Vec::with_capacity(paths.len());
     for path in paths {
@@ -154,15 +276,6 @@ pub async fn resolve_paths(paths: &[String]) -> anyhow::Result<Vec<ResolvedFile>
 }
 
 async fn resolve_single(path: &str) -> anyhow::Result<ResolvedFile> {
-    #[cfg(target_os = "android")]
-    if path.starts_with("content://") {
-        let owned = path.to_string();
-        return tokio::task::spawn_blocking(move || android_copy_uri(owned.as_str()))
-            .await
-            .map_err(|e| anyhow::anyhow!("spawn_blocking panicked: {e}"))?;
-    }
-
-    // Regular file path — stat only, no copy.
     let size = tokio::fs::metadata(path)
         .await
         .map(|m| m.len())
@@ -180,18 +293,10 @@ async fn resolve_single(path: &str) -> anyhow::Result<ResolvedFile> {
     })
 }
 
-// ── Android JNI implementation ────────────────────────────────────────────────
+// ── with_jni: internal helper ─────────────────────────────────────────────────
 
-/// Attaches the current thread to the JavaVM and runs `f` with a valid
-/// `JNIEnv`.
-///
-/// Uses `JVM_GLOBAL` (populated by `nativeInitJvm`).  Returns a descriptive
-/// `Err` rather than aborting the process if initialisation has not yet
-/// occurred.
-///
-/// `attach_current_thread` is idempotent: if the calling thread is already
-/// attached, it returns the existing env.  The `AttachGuard` only detaches on
-/// drop if *this call* was responsible for attaching.
+/// Attaches the current thread to the JavaVM and runs `f` with a valid JNIEnv.
+/// Uses JVM_GLOBAL populated by nativeInitJvm.
 #[cfg(target_os = "android")]
 fn with_jni<F, R>(f: F) -> anyhow::Result<R>
 where
@@ -199,8 +304,8 @@ where
 {
     let jvm = JVM_GLOBAL.get().ok_or_else(|| {
         anyhow::anyhow!(
-            "Android JVM not initialised — ensure RiftAndroidHelper.init() is called \
-             from MainActivity.onCreate() before any file operation is attempted"
+            "Android JVM not initialised. \
+             Ensure RiftAndroidHelper.init() is called from MainActivity.onCreate()."
         )
     })?;
 
@@ -209,152 +314,4 @@ where
         .map_err(|e| anyhow::anyhow!("attach_current_thread failed: {e:?}"))?;
 
     f(&mut env)
-}
-
-/// Calls `RiftAndroidHelper.<method>(uriString): String` using the cached
-/// class `GlobalRef`, completely bypassing `FindClass`.
-///
-/// The `GlobalRef` in `HELPER_CLASS` prevents the class object from being
-/// garbage-collected, making it safe to reconstruct a `JClass` from its raw
-/// pointer on any thread at any time.
-#[cfg(target_os = "android")]
-fn call_kotlin_string_method(uri: &str, method: &str) -> anyhow::Result<String> {
-    with_jni(|env| {
-        // ── Obtain class from cached GlobalRef (no FindClass) ─────────────────
-        let class_ref = HELPER_CLASS.get().ok_or_else(|| {
-            anyhow::anyhow!(
-                "RiftAndroidHelper class GlobalRef not cached — \
-                 nativeInitJvm may have failed to store the class reference. \
-                 Check logcat for '[AndroidFS] new_global_ref' errors."
-            )
-        })?;
-
-        // SAFETY: `HELPER_CLASS` holds a JNI global reference for the entire
-        // process lifetime, preventing garbage collection of the class object.
-        // `JClass::from_raw` creates a thin pointer wrapper over the same
-        // object; it is valid for the duration of this JNI call frame.
-        let class: jni::objects::JClass<'_> = unsafe {
-            jni::objects::JClass::from_raw(class_ref.as_raw())
-        };
-
-        // ── Build arguments ────────────────────────────────────────────────────
-        let uri_jstr = env
-            .new_string(uri)
-            .map_err(|e| anyhow::anyhow!("new_string({uri}): {e:?}"))?;
-
-        // ── Invoke static method ───────────────────────────────────────────────
-        let result = env
-            .call_static_method(
-                &class,
-                method,
-                "(Ljava/lang/String;)Ljava/lang/String;",
-                &[(&*uri_jstr).into()],
-            )
-            .map_err(|e| {
-                let _ = env.exception_clear();
-                anyhow::anyhow!("call_static_method {method}: {e:?}")
-            })?;
-
-        // ── Extract String result ──────────────────────────────────────────────
-        let jobj = result
-            .l()
-            .map_err(|e| anyhow::anyhow!("JValueOwned::l(): {e:?}"))?;
-
-        if jobj.is_null() {
-            return Ok(String::new());
-        }
-
-        let jstr = jni::objects::JString::from(jobj);
-        let rust_str: String = env
-            .get_string(&jstr)
-            .map_err(|e| anyhow::anyhow!("get_string: {e:?}"))?
-            .into();
-
-        Ok(rust_str)
-    })
-}
-
-/// Copies a `content://` URI to the cache directory via JNI and builds a
-/// `ResolvedFile` the transfer layer can open with `File::open`.
-///
-/// `copyUriToCache` returns `"absolutePath|fileSizeBytes"` so Rust obtains
-/// the accurate post-copy size directly from Kotlin (after `cacheFile.length()`),
-/// without a separate `std::fs::metadata` call that could be affected by path
-/// encoding or permission quirks.
-#[cfg(target_os = "android")]
-fn android_copy_uri(uri: &str) -> anyhow::Result<ResolvedFile> {
-    // ── Step 1: display name + declared size (no I/O, non-fatal on failure) ───
-    let info_str = call_kotlin_string_method(uri, "queryUriInfo")
-        .unwrap_or_else(|e| {
-            eprintln!("[AndroidFS] queryUriInfo failed (non-fatal, copy will still proceed): {e}");
-            "|0".to_string()
-        });
-
-    let mut info_parts = info_str.splitn(2, '|');
-    let name = {
-        let n = info_parts.next().unwrap_or("file");
-        if n.is_empty() { "file" } else { n }.to_string()
-    };
-    let declared_size: u64 = info_parts
-        .next()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-
-    // ── Step 2: copy URI bytes → app cache ────────────────────────────────────
-    // Returns "absoluteCachePath|fileSizeBytes".
-    let copy_result = call_kotlin_string_method(uri, "copyUriToCache")
-        .map_err(|e| anyhow::anyhow!("copyUriToCache JNI failed: {e}"))?;
-
-    if copy_result.is_empty() {
-        anyhow::bail!(
-            "Could not read '{name}' — check storage permissions and that \
-             the file still exists."
-        );
-    }
-
-    // ── Parse "cache_path|size_bytes" ─────────────────────────────────────────
-    // rfind guards against (highly unlikely) '|' characters in the cache path.
-    let (cache_path, copy_size) = match copy_result.rfind('|') {
-        Some(sep) => {
-            let path = copy_result[..sep].to_string();
-            let size: u64 = copy_result[sep + 1..].parse().unwrap_or(0);
-            (path, size)
-        }
-        // Fallback: Kotlin returned just a path with no size (should not happen
-        // with the updated copyUriToCache, but handled defensively).
-        None => (copy_result, 0u64),
-    };
-
-    if cache_path.is_empty() {
-        anyhow::bail!("Could not read '{name}': cache copy returned an empty path.");
-    }
-
-    // ── Determine actual file size ────────────────────────────────────────────
-    // Preference order:
-    //   1. copy_size  — from cacheFile.length() after the copy (most accurate).
-    //   2. declared_size — from ContentResolver SIZE column (often 0 for
-    //      Documents Provider URIs, so only use as fallback).
-    //   3. std::fs::metadata — last resort if both above are 0.
-    let actual_size = if copy_size > 0 {
-        copy_size
-    } else if declared_size > 0 {
-        declared_size
-    } else {
-        std::fs::metadata(&cache_path).map(|m| m.len()).unwrap_or(0)
-    };
-
-    if actual_size == 0 {
-        // The file is genuinely empty — clean up and surface a clear error.
-        let _ = std::fs::remove_file(&cache_path);
-        anyhow::bail!("'{name}' appears to be empty (0 bytes). Nothing to send.");
-    }
-
-    eprintln!("[AndroidFS] Resolved '{name}' → {cache_path} ({actual_size} B)");
-
-    Ok(ResolvedFile {
-        name,
-        real_path: cache_path.clone(),
-        size: actual_size,
-        temp_path: Some(cache_path),
-    })
 }

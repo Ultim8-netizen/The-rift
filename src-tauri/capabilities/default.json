@@ -9,6 +9,7 @@
     "fs:allow-read-file",
     "fs:allow-exists",
     "fs:allow-read-dir",
-    "opener:default"
+    "opener:default",
+    "os:default"
   ]
 }
