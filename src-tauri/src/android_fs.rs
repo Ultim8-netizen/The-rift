@@ -24,6 +24,29 @@
 //! to RiftFilePicker on the main thread (where the app classloader is active).
 //! trigger_android_picker() uses JClass::from_raw(PICKER_CLASS.get()) to call
 //! RiftFilePicker.pickFiles() without ever calling FindClass again.
+//!
+//! ── Why with_jni clears the pending exception ────────────────────────────────
+//! In jni-rs 0.21, "checked" JNI methods (call_static_method, get_static_method_id,
+//! etc.) call ExceptionCheck at the top of their implementation before making any
+//! JNI call. If there is already a pending Java exception on the thread, they
+//! return Err(JavaException) immediately — without invoking GetStaticMethodID,
+//! without invoking CallStaticVoidMethod, without entering Kotlin at all.
+//!
+//! Tauri 2's Android IPC bridge performs JNI operations on the same Tokio worker
+//! threads it dispatches commands on. If any of those operations encounter a Java
+//! exception that is handled internally on the Java side but not explicitly cleared
+//! at the JNI level before the thread returns to the pool, the exception persists
+//! on the thread's JNI state. attach_current_thread() on an already-attached thread
+//! reuses the existing env — including its stale exception state — so the orphaned
+//! exception is still pending when trigger_android_picker() runs.
+//!
+//! Per the JNI spec, ExceptionCheck, ExceptionDescribe, and ExceptionClear are
+//! among the handful of functions safe to call with a pending exception. Calling
+//! ExceptionClear at the start of with_jni() resets the thread to a clean state
+//! before any of our JNI operations run. This is an explicit transaction boundary:
+//! any exception still pending here was either already handled by its owner or
+//! orphaned by a caller that failed to clean up; either way it must not poison
+//! unrelated JNI operations.
 
 #[cfg(target_os = "android")]
 use std::sync::OnceLock;
@@ -64,10 +87,8 @@ static PICKER_CLASS: OnceLock<jni::objects::GlobalRef> = OnceLock::new();
 /// Oneshot sender side for the current in-progress pick operation.
 /// Set by trigger_android_picker() before calling Kotlin.
 /// Consumed by nativeOnFilesSelected() when Kotlin reports results.
-//
-// FIX 1: was `OnceLock;` — the semicolon was a spurious replacement for `<`.
 #[cfg(target_os = "android")]
-static PICK_SENDER: OnceLock<
+static PICK_SENDER: OnceLock<                                                // FIX 1: restored <
     std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Vec<PickedFile>>>>,
 > = OnceLock::new();
 
@@ -76,15 +97,9 @@ static PICK_SENDER: OnceLock<
 /// Called from Kotlin: RiftAndroidHelper.nativeInitJvm()
 /// Stores the JavaVM pointer and caches the RiftAndroidHelper class GlobalRef.
 /// Must run on the main thread so the app classloader is active.
-///
-/// Note: HELPER_CLASS was removed in this revision — the old JNI copy path
-/// (copyUriToCache via RiftAndroidHelper) has been replaced by RiftFilePicker.
-/// JVM_GLOBAL is kept because with_jni() is still used by trigger_android_picker.
-//
-// FIX 2: was missing `<` before `'local,` — the lifetime generic bracket was dropped.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_nativeInitJvm<
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_nativeInitJvm< // FIX 2: restored <
     'local,
 >(
     mut env: jni::JNIEnv<'local>,
@@ -106,17 +121,15 @@ pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_native
 /// Caches a GlobalRef to RiftFilePicker so worker threads can call its static
 /// methods without invoking FindClass (which would use the bootstrap loader).
 /// Must run on the main thread — called from RiftFilePicker.register().
-//
-// FIX 3: was missing `<` before `'local,` — same dropped bracket as above.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeRegisterPickerClass<
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeRegisterPickerClass< // FIX 3: restored <
     'local,
 >(
     mut env: jni::JNIEnv<'local>,
     class_param: jni::objects::JClass<'local>,
 ) {
-    match env.new_global_ref(class_param) {
+    match env.new_global_ref(&class_param) {
         Ok(global_ref) => {
             if PICKER_CLASS.set(global_ref).is_ok() {
                 eprintln!("[FilePicker] RiftFilePicker cached as GlobalRef");
@@ -130,11 +143,9 @@ pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeReg
 /// Each element of `paths` is "displayName\nabsolutePath\nsizeBytes".
 /// An empty array signals cancellation or complete failure.
 /// Signals the waiting trigger_android_picker() via the PICK_SENDER oneshot.
-//
-// FIX 4: was missing `<` before `'local,` — same dropped bracket as above.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeOnFilesSelected<
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeOnFilesSelected< // FIX 4: restored <
     'local,
 >(
     mut env: jni::JNIEnv<'local>,
@@ -233,12 +244,25 @@ pub async fn trigger_android_picker() -> anyhow::Result<Vec<PickedFile>> {
         // valid for the duration of this JNI call frame.
         let class = unsafe { jni::objects::JClass::from_raw(class_ref.as_raw()) };
 
+        eprintln!("[FilePicker] invoking RiftFilePicker.pickFiles() via JNI");
+
         env.call_static_method(&class, "pickFiles", "()V", &[])
             .map_err(|e| {
-                let _ = env.exception_clear();
+                // Dump the pending Java exception to stderr (appears in logcat under
+                // RustStdoutStderr) BEFORE clearing it. This is the definitive
+                // diagnostic: if this error path is still reached after the
+                // exception_clear() added in with_jni(), exception_describe() will
+                // show exactly which Java exception class is being thrown and from
+                // where — NoSuchMethodError, NullPointerException, or otherwise.
+                if env.exception_check().unwrap_or(false) {
+                    eprintln!("[FilePicker] pending Java exception at JNI boundary:");
+                    let _ = env.exception_describe();
+                    let _ = env.exception_clear();
+                }
                 anyhow::anyhow!("RiftFilePicker.pickFiles() JNI failed: {e:?}")
             })?;
 
+        eprintln!("[FilePicker] pickFiles() posted to main thread Handler — waiting for result");
         Ok(())
     });
 
@@ -297,6 +321,9 @@ async fn resolve_single(path: &str) -> anyhow::Result<ResolvedFile> {
 
 /// Attaches the current thread to the JavaVM and runs `f` with a valid JNIEnv.
 /// Uses JVM_GLOBAL populated by nativeInitJvm.
+///
+/// Clears any pending Java exception on the env before dispatching to `f`.
+/// See the module-level doc comment for why this is necessary and safe.
 #[cfg(target_os = "android")]
 fn with_jni<F, R>(f: F) -> anyhow::Result<R>
 where
@@ -312,6 +339,37 @@ where
     let mut env = jvm
         .attach_current_thread()
         .map_err(|e| anyhow::anyhow!("attach_current_thread failed: {e:?}"))?;
+
+    // ── Clear stale pending exception ─────────────────────────────────────────
+    //
+    // jni-rs 0.21 "checked" methods (call_static_method, get_static_method_id,
+    // etc.) call ExceptionCheck at the top of their implementation. If a pending
+    // exception is detected they return Err(JavaException) immediately, before
+    // making any JNI call and before any Kotlin code runs.
+    //
+    // Tauri 2's Android IPC bridge makes JNI calls on the same Tokio worker
+    // threads used to run async commands. If any of those calls encounters a
+    // Java exception that is handled internally on the Java side but not cleared
+    // at the JNI layer, the exception lingers on the thread. When
+    // attach_current_thread() reuses an already-attached thread it inherits that
+    // stale exception state verbatim.
+    //
+    // ExceptionCheck, ExceptionDescribe, and ExceptionClear are explicitly listed
+    // in the JNI spec as safe to call with a pending exception. Clearing here is
+    // safe: this is an explicit transaction boundary, and any exception still
+    // pending from prior work on this thread is either already handled or orphaned.
+    if env.exception_check().unwrap_or(false) {
+        eprintln!(
+            "[FilePicker] WARNING: stale pending exception on JNI env (thread reuse artifact). \
+             Clearing before dispatch. Exception details:"
+        );
+        // exception_describe() prints the exception class, message, and Java stack
+        // trace to stderr. Visible in logcat under the RustStdoutStderr tag.
+        // This line is the primary diagnostic if the picker is still broken after
+        // this fix: the logcat will show exactly which Java exception was orphaned.
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
 
     f(&mut env)
 }
