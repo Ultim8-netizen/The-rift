@@ -25,8 +25,14 @@ async fn get_gateway_windows() -> anyhow::Result<String> {
 
     // `route print 0.0.0.0` gives the default route entries.
     // Typical line: "         0.0.0.0          0.0.0.0    192.168.137.1  192.168.137.1      25"
+    //
+    // CREATE_NO_WINDOW (0x08000000): prevents a console window from flashing on screen.
+    // Without this flag, every spawn of route.exe creates a visible terminal window
+    // for the duration of the process — at 1-second bond-keeper intervals this causes
+    // continuous terminal flashing that blocks desktop use.
     let out = Command::new("route")
         .args(["print", "0.0.0.0"])
+        .creation_flags(0x08000000)
         .output()
         .await?;
 

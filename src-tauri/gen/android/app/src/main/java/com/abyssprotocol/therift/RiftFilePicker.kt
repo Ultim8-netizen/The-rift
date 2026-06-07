@@ -31,14 +31,53 @@ import java.io.IOException
  *   MainActivity.onCreate() must call RiftFilePicker.register(this) before the
  *   activity reaches STARTED state. registerForActivityResult() has this hard
  *   requirement.
+ *
+ * ── Thread-safety: why @Volatile is required ─────────────────────────────────
+ *
+ * `launcher` is written on the MAIN THREAD in register() and read from a JNI
+ * WORKER THREAD in pickFiles() (Rust's pick_files_for_send Tauri command runs
+ * on a Tokio thread that is attached to the JVM via AttachCurrentThread).
+ *
+ * The Java Memory Model (JMM, JSR-133) guarantees that a write to a field is
+ * visible to a subsequent read on another thread ONLY if there is a
+ * happens-before edge between the write and the read. Without @Volatile or
+ * explicit synchronisation, no such edge exists here — the JMM explicitly
+ * permits (and compilers/CPUs exploit) the read seeing a stale cached value.
+ *
+ * On x86 the strong TSO memory model makes this benign in practice. On ARM —
+ * specifically Cortex-A53 and A55, the MediaTek Helio G85/G88/G96 cores found
+ * in TECNO Camon/Spark, Infinix Hot/Note, and Itel P-series — stores are
+ * locally buffered and are NOT immediately visible to other cores without a
+ * barrier. The Tokio thread can therefore observe launcher == null even if
+ * register() has already completed on the main thread.
+ *
+ * When pickFiles() sees null it falls into the null-launcher path and calls
+ * nativeOnFilesSelected(emptyArray()). If nativeOnFilesSelected is registered
+ * only through RegisterNatives (inside nativeRegisterPickerClass()) rather than
+ * via JNI_OnLoad name-mangling, and nativeRegisterPickerClass() has not yet
+ * completed, that call throws UnsatisfiedLinkError. UnsatisfiedLinkError is a
+ * Throwable, not caught by any try-catch in the original pickFiles(), so it
+ * escapes across the JNI boundary. The jni Rust crate surfaces a pending Java
+ * exception as Err(Error::JavaException). Rust formats this as:
+ *
+ *   "RiftFilePicker.pickFiles() JNI failed: JavaException"
+ *
+ * exactly what is visible in the UI error banner.
+ *
+ * @Volatile inserts StoreStore + LoadStore barriers on the write site and a
+ * LoadLoad + StoreLoad barrier on the read site, guaranteeing the JNI thread
+ * always sees the launcher value that register() committed.
  */
 object RiftFilePicker {
 
     private const val TAG = "RiftFilePicker"
 
-    // ActivityResultLauncher<String> — input is MIME type, output is List<Uri>.
-    // GetMultipleContents uses ACTION_GET_CONTENT + CATEGORY_OPENABLE +
-    // EXTRA_ALLOW_MULTIPLE. CATEGORY_OPENABLE guarantees openInputStream works.
+    /**
+     * @Volatile enforces JMM happens-before between the main-thread write in
+     * register() and the JNI worker-thread read in pickFiles().
+     * Mandatory for correctness on weakly-ordered ARM micro-architectures.
+     */
+    @Volatile
     private var launcher: ActivityResultLauncher<String>? = null
 
     // ── Registration ──────────────────────────────────────────────────────────
@@ -62,30 +101,69 @@ object RiftFilePicker {
             nativeRegisterPickerClass()
         } catch (e: UnsatisfiedLinkError) {
             Log.e(TAG, "nativeRegisterPickerClass: native library not loaded yet — ${e.message}")
+        } catch (e: Throwable) {
+            // Broadened from UnsatisfiedLinkError only. Any other Throwable escaping
+            // here (e.g. a Rust panic converted to a RuntimeException, or a JNI
+            // internal error) would propagate into MainActivity.onCreate() and crash
+            // the app at startup — a worse outcome than the degraded state logged here.
+            Log.e(TAG, "nativeRegisterPickerClass: unexpected error (${e::class.simpleName}): ${e.message}")
         }
     }
 
     // ── JNI entry point called from Rust ─────────────────────────────────────
 
     /**
-     * Called from Rust's trigger_android_picker() via JNI.
-     * Posts launch() to the main thread (JNI may call from any Tokio thread).
+     * Called from Rust's trigger_android_picker() via JNI on a Tokio worker thread.
+     *
+     * CONTRACT: This method MUST NOT allow any exception to escape across the JNI
+     * boundary. The jni Rust crate converts any pending Java exception into
+     * Err(Error::JavaException), causing the entire pick_files_for_send command to
+     * fail and display "RiftFilePicker.pickFiles() JNI failed: JavaException" in
+     * the UI. Every code path in this method is therefore guarded with
+     * try-catch(Throwable).
+     *
+     * Posts launch() to the main thread (JNI may call from any Tokio thread) and
+     * returns immediately. Results arrive later via nativeOnFilesSelected().
      */
     @JvmStatic
     fun pickFiles() {
-        val l = launcher
-        if (l == null) {
-            Log.e(TAG, "pickFiles() called before register() — signalling empty result")
-            nativeOnFilesSelected(emptyArray())
-            return
-        }
-        android.os.Handler(android.os.Looper.getMainLooper()).post {
-            try {
-                l.launch("*/*")
-            } catch (e: Exception) {
-                Log.e(TAG, "launcher.launch() failed: ${e.message}")
-                nativeOnFilesSelected(emptyArray())
+        try {
+            val l = launcher
+            if (l == null) {
+                // With @Volatile this path should never be reached in normal operation:
+                // register() runs in onCreate() before the WebView renders and the user
+                // can interact with any UI control. The path is preserved as a defensive
+                // fallback — if somehow reached, signal empty result immediately so the
+                // Rust channel receiver unblocks rather than hanging indefinitely.
+                Log.e(TAG, "pickFiles() called before register() — signalling empty result")
+                safeSignalEmpty()
+                return
             }
+
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                try {
+                    l.launch("*/*")
+                } catch (e: Throwable) {
+                    // Changed from catch(Exception) to catch(Throwable).
+                    //
+                    // Exception catches most cases (ActivityNotFoundException,
+                    // IllegalStateException from lifecycle mismatch). But Error
+                    // subclasses — OutOfMemoryError, StackOverflowError — are not
+                    // Exception and would escape uncaught, silently leaving Rust
+                    // blocked on its channel receiver. Catching Throwable here ensures
+                    // safeSignalEmpty() always runs and Rust always unblocks.
+                    Log.e(TAG, "launcher.launch() failed (${e::class.simpleName}): ${e.message}")
+                    safeSignalEmpty()
+                }
+            }
+        } catch (e: Throwable) {
+            // Top-level safety net for anything outside the Handler.post block —
+            // theoretically unreachable (Looper.getMainLooper() does not throw on
+            // a running Activity, Handler construction does not throw), but present
+            // as an absolute guarantee that pickFiles() never propagates a Throwable
+            // to the JNI caller.
+            Log.e(TAG, "pickFiles() unexpected error (${e::class.simpleName}): ${e.message}")
+            safeSignalEmpty()
         }
     }
 
@@ -116,6 +194,32 @@ object RiftFilePicker {
             }
             nativeOnFilesSelected(results.toTypedArray())
         }.start()
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /**
+     * Calls nativeOnFilesSelected(emptyArray()) without throwing.
+     *
+     * This is the canonical "unblock Rust" signal for all error-fallback paths.
+     * Centralising it here means every failure path — null launcher, launch()
+     * crash, top-level exception — goes through a single, exception-safe call site.
+     *
+     * If nativeOnFilesSelected itself throws (e.g. UnsatisfiedLinkError if
+     * nativeRegisterPickerClass() never ran successfully and the native method was
+     * not registered via JNI_OnLoad, or a Rust panic wrapped as a Java exception),
+     * the exception is swallowed and logged. Rust will time out on its channel
+     * receiver rather than receive an explicit empty result — an acceptable degraded
+     * state compared to the JavaException that would otherwise crash the command.
+     */
+    private fun safeSignalEmpty() {
+        try {
+            nativeOnFilesSelected(emptyArray())
+        } catch (e: Throwable) {
+            Log.e(TAG, "safeSignalEmpty: nativeOnFilesSelected threw (${e::class.simpleName}): ${e.message}")
+            // Cannot unblock Rust's channel receiver. The pick_files_for_send
+            // command must rely on its own timeout to recover.
+        }
     }
 
     // ── File copy ─────────────────────────────────────────────────────────────

@@ -38,6 +38,16 @@
 //!
 //! Note: Android process-to-network binding (cellular rerouting fix) lives in
 //! RiftService.kt — it requires ConnectivityManager which is Java-only.
+//!
+//! Windows terminal flash fix
+//! ──────────────────────────
+//! Gateway detection on Windows spawns route.exe. The refresh condition was
+//! previously `gateway.is_none() || ticks % REFRESH == 0` — if route.exe ever
+//! failed (no default route, UAC, etc.) gateway stayed None permanently and
+//! route.exe was re-spawned on every 1-second tick, causing endless terminal
+//! flashing. Fixed by using `ticks % REFRESH == 0` only: tick 0 fires
+//! immediately (0 % 60 == 0), subsequent retries wait the full 60-second window.
+//! gateway.rs independently adds CREATE_NO_WINDOW so any remaining spawn is silent.
 
 use crate::state::SharedState;
 use std::time::{Duration, Instant};
@@ -55,6 +65,8 @@ const BOND_PING_INTERVAL: Duration = Duration::from_secs(1);
 const PEER_ABSENCE_RESCAN_SECS: u64 = 20;
 
 /// Re-read the gateway IP every N ticks (~60 s) to handle DHCP renewals.
+/// Also controls how long we wait before retrying a failed gateway detection.
+/// At 1-second tick intervals this is one route.exe spawn per minute maximum.
 const GATEWAY_REFRESH_TICKS: u32 = 60;
 
 /// Port used for bond pings. Matches our own broadcast port so the packet
@@ -83,9 +95,15 @@ pub async fn start_bond_keeper(state: SharedState, _app: AppHandle) -> anyhow::R
         interval.tick().await;
 
         // ── Gateway refresh ───────────────────────────────────────────────────
-        // Refreshed periodically rather than every tick to avoid spawning a
-        // process (ip route / route print) 60 times per minute.
-        if gateway.is_none() || gateway_ticks % GATEWAY_REFRESH_TICKS == 0 {
+        // Refresh on tick 0 (startup) and every GATEWAY_REFRESH_TICKS thereafter.
+        //
+        // IMPORTANT: do NOT use `gateway.is_none() || ticks % REFRESH == 0`.
+        // If gateway detection fails (e.g. no default route on Windows), that
+        // condition re-spawns route.exe on every 1-second tick for the entire
+        // lifetime of the app, causing continuous terminal window flashing that
+        // makes the desktop unusable. The modulo-only guard limits retries to
+        // once per 60 seconds regardless of whether the previous attempt succeeded.
+        if gateway_ticks % GATEWAY_REFRESH_TICKS == 0 {
             match super::gateway::get_gateway_ip().await {
                 Ok(gw) => {
                     if gateway.as_deref() != Some(&gw) {
@@ -96,6 +114,7 @@ pub async fn start_bond_keeper(state: SharedState, _app: AppHandle) -> anyhow::R
                 Err(_) => {
                     // Non-fatal: hotspot host device, emulator, or WiFi not yet
                     // associated. Broadcast-only fallback keeps the radio alive.
+                    // Next retry in GATEWAY_REFRESH_TICKS seconds (not next tick).
                 }
             }
         }
