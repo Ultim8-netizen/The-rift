@@ -12,6 +12,23 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# ── Optional features ─────────────────────────────────────────────────────────
+[features]
+# Tier 1 Android file picker: tauri-plugin-android-fs (Tauri plugin infrastructure).
+# This is the gold standard — no custom JNI, ActivityResultLauncher registered
+# through proper plugin lifecycle hooks.
+#
+# HOW TO ENABLE:
+#   1. Verify the crate is available:
+#      - crates.io: https://crates.io/crates/tauri-plugin-android-fs
+#      - GitHub:    https://github.com/aiueo13/tauri-plugin-android-fs
+#   2. Check the correct version for your Tauri v2 setup and update below.
+#   3. Build: cargo tauri android build -- --features android-fs
+#
+# WITHOUT this feature, Tier 2 (poll-based, guaranteed fix) handles picking.
+android-fs = ["dep:tauri-plugin-android-fs"]
+
+# ── Dependencies ──────────────────────────────────────────────────────────────
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-fs = "2"
@@ -19,6 +36,11 @@ tauri-plugin-dialog = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-os = "2"
+
+# Tier 1 Android file picker (optional — see [features] android-fs above).
+# Version: update to match the published version you verify.
+# If git-only: { git = "https://github.com/aiueo13/tauri-plugin-android-fs", optional = true }
+tauri-plugin-android-fs = { version = "2", optional = true }
 
 tokio = { version = "1", features = ["full"] }
 
@@ -56,5 +78,5 @@ jni = { version = "0.21", default-features = false }
 panic = "abort"
 codegen-units = 1
 lto = true
-opt-level = 3   # was "s" — restores BLAKE3 SIMD paths; critical for per-chunk hashing speed
+opt-level = 3
 strip = true

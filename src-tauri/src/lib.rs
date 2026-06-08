@@ -11,8 +11,8 @@ use tauri::{Emitter, State};
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppStatePayload {
-    own_device_name: String,
-    network_status: String,
+    own_device_name:  String,
+    network_status:   String,
     devices_in_range: usize,
 }
 
@@ -20,33 +20,36 @@ struct AppStatePayload {
 async fn get_app_state(state: State<'_, SharedState>) -> Result<AppStatePayload, String> {
     let s = state.lock().await;
     Ok(AppStatePayload {
-        own_device_name: s.own_device_name.clone(),
-        network_status: "searching".to_string(),
+        own_device_name:  s.own_device_name.clone(),
+        network_status:   "searching".to_string(),
         devices_in_range: s.devices.len(),
     })
 }
 
-/// Launches the native file picker on Android and returns staged files ready
-/// for transfer. Files are copied to the app's private cache directory inside
-/// the activity result callback — while the URI grant is live — before this
-/// command returns. No content:// URI ever reaches Rust.
+/// Android: launches the three-tier file picker, returns staged files.
+///   Tier 1: tauri-plugin-android-fs (if compiled with --features android-fs)
+///   Tier 2: AtomicBool poll-trigger -> Kotlin daemon -> nativeOnFilesSelected
+///   Tier 3: accessible directory scan (diagnostic only -- returns Err with logcat guidance)
 ///
-/// On non-Android platforms this command returns an Err with a sentinel value
-/// ("USE_DIALOG_PLUGIN") that the frontend uses to fall back to the existing
-/// tauri-plugin-dialog + get_file_metadata flow.
+/// Desktop: returns "USE_DIALOG_PLUGIN" sentinel, frontend falls back to tauri-plugin-dialog.
+///
+/// Note: `app: tauri::AppHandle` is required for Tier 1 plugin access.
 #[tauri::command]
-async fn pick_files_for_send() -> Result<Vec<StagedFile>, String> {
+async fn pick_files_for_send(app: tauri::AppHandle) -> Result<Vec<StagedFile>, String> {
     #[cfg(target_os = "android")]
     {
-        let picked = android_fs::trigger_android_picker()
+        let picked = android_fs::trigger_android_picker(&app)
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                eprintln!("[PickFiles] All tiers exhausted: {e}");
+                e.to_string()
+            })?;
 
         let staged: Vec<StagedFile> = picked
             .into_iter()
             .map(|f| StagedFile {
-                name: f.name,
-                path: f.path,
+                name:       f.name,
+                path:       f.path,
                 size_bytes: f.size,
             })
             .collect();
@@ -56,16 +59,11 @@ async fn pick_files_for_send() -> Result<Vec<StagedFile>, String> {
 
     #[cfg(not(target_os = "android"))]
     {
-        // Tell the frontend to use its existing dialog-plugin path.
+        let _ = app; // suppress unused warning on desktop
         Err("USE_DIALOG_PLUGIN".to_string())
     }
 }
 
-/// Returns file metadata for the given paths.
-/// On Android, paths must be plain filesystem paths (not content:// URIs).
-/// In the new architecture, content:// URIs never reach this command —
-/// RiftFilePicker copies them to cache and returns plain paths via
-/// pick_files_for_send.
 #[tauri::command]
 async fn get_file_metadata(paths: Vec<String>) -> Result<Vec<StagedFile>, String> {
     let mut out = Vec::with_capacity(paths.len());
@@ -74,8 +72,8 @@ async fn get_file_metadata(paths: Vec<String>) -> Result<Vec<StagedFile>, String
             Ok(mut resolved) if !resolved.is_empty() => {
                 let r = resolved.remove(0);
                 out.push(StagedFile {
-                    name: r.name,
-                    path: r.real_path,
+                    name:       r.name,
+                    path:       r.real_path,
                     size_bytes: r.size,
                 });
             }
@@ -98,7 +96,7 @@ async fn get_file_metadata(paths: Vec<String>) -> Result<Vec<StagedFile>, String
 
 #[tauri::command]
 async fn start_discovery(
-    app: tauri::AppHandle,
+    app:   tauri::AppHandle,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
     let s = state.inner().clone();
@@ -112,7 +110,7 @@ async fn start_discovery(
 
 #[tauri::command]
 async fn rescan(
-    app: tauri::AppHandle,
+    app:   tauri::AppHandle,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
     {
@@ -153,9 +151,9 @@ async fn rescan(
 #[tauri::command]
 async fn send_files(
     target_device_id: String,
-    file_paths: Vec<String>,
-    app: tauri::AppHandle,
-    state: State<'_, SharedState>,
+    file_paths:       Vec<String>,
+    app:              tauri::AppHandle,
+    state:            State<'_, SharedState>,
 ) -> Result<(), String> {
     let (target, _own_id) = {
         let s = state.lock().await;
@@ -172,17 +170,16 @@ async fn send_files(
         e.to_string()
     })?;
 
-    // On Android, file_paths contains pre-copied cache paths from pick_files_for_send.
-    // The rift_send_ prefix identifies them so they can be cleaned up after transfer.
     #[allow(unused_mut)]
-    let mut temp_paths: Vec<Option<String>> = resolved.iter().map(|r| r.temp_path.clone()).collect();
+    let mut temp_paths: Vec<Option<String>> =
+        resolved.iter().map(|r| r.temp_path.clone()).collect();
 
     #[cfg(target_os = "android")]
     for p in &file_paths {
         if std::path::Path::new(p)
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.starts_with("rift_send_"))
+            .map(|n| n.starts_with("rift_send_") || n.starts_with("rift_t1_"))
             .unwrap_or(false)
         {
             temp_paths.push(Some(p.clone()));
@@ -192,10 +189,10 @@ async fn send_files(
     let files: Vec<state::FileEntry> = resolved
         .into_iter()
         .map(|r| state::FileEntry {
-            name: r.name,
-            path: r.real_path,
+            name:       r.name,
+            path:       r.real_path,
             size_bytes: r.size,
-            mime_type: "application/octet-stream".to_string(),
+            mime_type:  "application/octet-stream".to_string(),
         })
         .collect();
 
@@ -264,7 +261,6 @@ async fn send_files(
             Err(e) => {
                 let msg = e.to_string();
                 eprintln!("[Send] Transfer error: {e}");
-
                 if msg.contains("declined by receiver") {
                     let _ = app_clone.emit(
                         "transfer_declined",
@@ -280,7 +276,6 @@ async fn send_files(
                         .timeout(std::time::Duration::from_secs(5))
                         .send()
                         .await;
-
                     let _ = app_clone.emit(
                         "transfer_error",
                         &serde_json::json!({ "transferId": tid, "message": msg }),
@@ -296,9 +291,9 @@ async fn send_files(
 #[tauri::command]
 async fn send_text(
     target_device_id: String,
-    text: String,
-    app: tauri::AppHandle,
-    state: State<'_, SharedState>,
+    text:             String,
+    app:              tauri::AppHandle,
+    state:            State<'_, SharedState>,
 ) -> Result<(), String> {
     let target = {
         let s = state.lock().await;
@@ -329,7 +324,7 @@ async fn send_text(
 #[tauri::command]
 async fn accept_transfer(
     transfer_id: String,
-    state: State<'_, SharedState>,
+    state:       State<'_, SharedState>,
 ) -> Result<(), String> {
     let (sender_ip, sender_port) = {
         let s = state.lock().await;
@@ -345,7 +340,7 @@ async fn accept_transfer(
             .map(|d| d.ip.clone())
             .unwrap_or_else(|| {
                 eprintln!(
-                    "[Accept] Sender {} not in device state — falling back to self-reported IP {}",
+                    "[Accept] Sender {} not in device state -- falling back to self-reported IP {}",
                     pending.sender_device.id, pending.sender_device.ip
                 );
                 pending.sender_device.ip.clone()
@@ -355,13 +350,13 @@ async fn accept_transfer(
     };
 
     let url = format!("http://{}:{}/accept/{}", sender_ip, sender_port, transfer_id);
-    eprintln!("[Accept] → {url}");
+    eprintln!("[Accept] -> {url}");
 
     reqwest::Client::new()
         .post(&url)
         .send()
         .await
-        .map_err(|e| format!("Accept signal failed — is the sender still reachable? ({e})"))?;
+        .map_err(|e| format!("Accept signal failed -- is the sender still reachable? ({e})"))?;
 
     state.lock().await.pending_transfers.remove(&transfer_id);
     Ok(())
@@ -370,7 +365,7 @@ async fn accept_transfer(
 #[tauri::command]
 async fn decline_transfer(
     transfer_id: String,
-    state: State<'_, SharedState>,
+    state:       State<'_, SharedState>,
 ) -> Result<(), String> {
     let (sender_ip, sender_port) = {
         let s = state.lock().await;
@@ -401,13 +396,10 @@ async fn decline_transfer(
     Ok(())
 }
 
-// ── Hotspot commands ──────────────────────────────────────────────────────────
-
 #[tauri::command]
 async fn start_hotspot(state: State<'_, SharedState>) -> Result<HotspotInfo, String> {
-    let ssid = format!("TheRift-{}", network::generate_ssid());
+    let ssid     = format!("TheRift-{}", network::generate_ssid());
     let password = network::generate_password();
-
     match network::start_hotspot(&ssid, &password).await {
         Ok(info) => {
             state.lock().await.hotspot_info = Some(info.clone());
@@ -426,9 +418,9 @@ async fn stop_hotspot(state: State<'_, SharedState>) -> Result<(), String> {
 
 #[tauri::command]
 async fn connect_to_hotspot(
-    ssid: String,
+    ssid:     String,
     password: String,
-    state: State<'_, SharedState>,
+    state:    State<'_, SharedState>,
 ) -> Result<HotspotInfo, String> {
     match network::connect_to_hotspot(&ssid, &password).await {
         Ok(info) => {
@@ -453,13 +445,13 @@ async fn detect_hotspot(state: State<'_, SharedState>) -> Result<HotspotInfo, St
         }
         None => Err(
             "No active hotspot found. Make sure Mobile Hotspot is turned on \
-            in Windows Settings, then try again."
+             in Windows Settings, then try again."
                 .to_string(),
         ),
     }
 }
 
-// ── App entry point ───────────────────────────────────────────────────────────
+// -- App entry point ----------------------------------------------------------
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -490,12 +482,25 @@ pub fn run() {
 
     let shared_state = new_shared_state();
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_os::init())       // ← added
+    // FIX: `mut` removed. The android-fs conditional now uses a shadowing
+    // `let` rebind instead of assignment, which requires no mutability.
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_opener::init());
+
+    // Tier 1: register android-fs plugin when feature is enabled.
+    // Must happen before .manage() and .invoke_handler().
+    // Shadowing rebind: no `mut` needed on the outer `builder`.
+    #[cfg(all(target_os = "android", feature = "android-fs"))]
+    let builder = {
+        eprintln!("[Runtime] tauri-plugin-android-fs registered (Tier 1 active)");
+        builder.plugin(tauri_plugin_android_fs::init())
+    };
+
+    builder
         .manage(shared_state.clone())
         .invoke_handler(tauri::generate_handler![
             get_app_state,
@@ -514,7 +519,7 @@ pub fn run() {
             detect_hotspot,
         ])
         .setup(move |app| {
-            let app_handle = app.handle().clone();
+            let app_handle  = app.handle().clone();
             let state_clone = shared_state.clone();
 
             tauri::async_runtime::spawn(async move {
@@ -586,9 +591,6 @@ pub fn run() {
                     });
                 }
                 {
-                    // WiFi bond maintenance: 1-second UDP pings keep the radio
-                    // active before any peer is discovered, preventing the AP's
-                    // idle-eviction timer from firing between connection events.
                     let s = state_clone.clone();
                     let a = app_handle.clone();
                     tauri::async_runtime::spawn(async move {

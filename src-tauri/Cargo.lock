@@ -4188,6 +4188,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-plugin-android-fs"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b32de3840d40ed36ff3582be57aef79f70e8466a842c98fb8be0109ee5cbf796"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "tauri-plugin-fs",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "tauri-plugin-dialog"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4435,6 +4449,7 @@ dependencies = [
  "socket2 0.5.10",
  "tauri",
  "tauri-build",
+ "tauri-plugin-android-fs",
  "tauri-plugin-dialog",
  "tauri-plugin-fs",
  "tauri-plugin-opener",
