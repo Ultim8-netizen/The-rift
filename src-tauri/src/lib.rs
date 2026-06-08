@@ -429,7 +429,7 @@ async fn decline_transfer(
             .unwrap_or_else(|| pending.sender_device.ip.clone());
 
         (ip, pending.sender_device.port)
-    );
+    }; // FIX: was `);` — block expression closes with `}`, not `)`
 
     let url = format!("http://{}:{}/decline/{}", sender_ip, sender_port, transfer_id);
 

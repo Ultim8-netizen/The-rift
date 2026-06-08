@@ -119,7 +119,7 @@ static PICK_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// Oneshot result channel — sender registered by trigger_android_picker_tier2(),
 /// consumed by nativeOnFilesSelected() when Kotlin delivers results.
 #[cfg(target_os = "android")]
-static PICK_SENDER: OnceLock
+static PICK_SENDER: OnceLock<  // FIX: was `OnceLock` — missing `<`
     std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Vec<PickedFile>>>>,
 > = OnceLock::new();
 
@@ -134,7 +134,7 @@ static PICK_SENDER: OnceLock
 /// Stores the JavaVM pointer. Called on the main thread during init.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_nativeInitJvm
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_nativeInitJvm<  // FIX: missing `<`
     'local,
 >(
     mut env: jni::JNIEnv<'local>,
@@ -155,7 +155,7 @@ pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_native
 /// RiftFilePicker.register() so the app class loader is active.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeRegisterPickerClass
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeRegisterPickerClass<  // FIX: missing `<`
     'local,
 >(
     mut env: jni::JNIEnv<'local>,
@@ -181,7 +181,7 @@ pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeReg
 /// No Tauri exception state. No ExceptionCheck risk. Always safe.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeGetPickRequest
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeGetPickRequest<  // FIX: missing `<`
     'local,
 >(
     _env: jni::JNIEnv<'local>,
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeGet
 /// DIRECTION: Kotlin->Rust. Runs on the worker thread spawned in onPickerResult.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeOnFilesSelected
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeOnFilesSelected<  // FIX: missing `<`
     'local,
 >(
     mut env: jni::JNIEnv<'local>,
