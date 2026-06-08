@@ -1,42 +1,71 @@
-//! Platform-aware file path resolver and Android file picker bridge.
+//! Platform-aware file path resolver, Android file picker bridge, and native
+//! directory scanner.
 //!
-//! -- Three-tier Android file picker ------------------------------------------
+//! ── Three-tier Android file picker ─────────────────────────────────────────
 //!
-//! TIER 1: tauri-plugin-android-fs  [optional, requires --features android-fs]
+//! TIER 1: tauri-plugin-android-fs  [optional, --features android-fs]
 //!   Uses Tauri's proper Android plugin infrastructure. ActivityResultLauncher
-//!   is registered through plugin lifecycle hooks, not MainActivity.onCreate.
-//!   No custom JNI of any kind. This is the architecturally correct solution.
+//!   registered through plugin lifecycle hooks, not MainActivity.onCreate.
+//!   No custom JNI. Architecturally correct, but requires the external crate.
 //!   Failure -> silent fallthrough to Tier 2.
 //!
-//! TIER 2: Poll-based Kotlin trigger  [default, always active]
-//!   ROOT-CAUSE FIX for the JavaException error:
+//! TIER 2: Poll-based trigger + OpenMultipleDocuments (Kotlin daemon)
 //!
-//!   Root cause: Rust called RiftFilePicker.pickFiles() via
-//!   env.call_static_method(). jni-rs 0.21 calls ExceptionCheck at the top of
-//!   every "checked" JNI method. Tauri's IPC bridge leaves stale pending
-//!   exceptions on its Tokio worker threads. When our code ran on a reused
-//!   thread, the stale exception caused call_static_method to return
-//!   Err(JavaException) immediately -- before touching Kotlin at all.
+//!   GENERATION 1 BUG: Rust called RiftFilePicker.pickFiles() via
+//!   env.call_static_method(). Tauri's IPC bridge leaves stale pending
+//!   exceptions on Tokio worker threads. jni-rs 0.21 calls ExceptionCheck at
+//!   the top of every checked JNI call. Stale exception -> JavaException ->
+//!   "RiftFilePicker.pickFiles() JNI failed: JavaException" in the UI.
 //!
-//!   Fix: eliminate ALL Rust->Kotlin JNI calls. Rust sets PICK_REQUESTED (a
-//!   plain AtomicBool, no JNI). Kotlin's daemon thread polls
-//!   nativeGetPickRequest() [Kotlin->Rust direction] every 100ms and launches
-//!   the picker when it sees true. ALL JNI calls are now Kotlin->Rust --
-//!   running on Kotlin-managed threads with no Tauri stale-exception pollution.
+//!   GENERATION 2 BUG: Rust side was rewritten to use PICK_REQUESTED AtomicBool.
+//!   The Kotlin polling daemon was documented but never implemented. PICK_REQUESTED
+//!   was set but nothing read it. The 5-minute timeout always elapsed and Tier 3
+//!   produced the error banner. "Both failed" message in the screenshot.
+//!
+//!   GENERATION 3 FIX (current):
+//!     • RiftFilePicker.startPickPoller() daemon thread implemented in Kotlin.
+//!       Polls nativeGetPickRequest() [Kotlin->Rust] every 100ms. When true,
+//!       posts launcher.launch(arrayOf("*/*")) to the main thread.
+//!     • Contract changed from GetMultipleContents (ACTION_GET_CONTENT) to
+//!       OpenMultipleDocuments (ACTION_OPEN_DOCUMENT). ACTION_GET_CONTENT
+//!       launches into a separate task on OEM builds (TECNO/Transsion, Samsung,
+//!       MIUI), causing the ActivityResultLauncher callback to be silently
+//!       dropped. ACTION_OPEN_DOCUMENT routes to DocumentsUI which is designed
+//!       to return results to the calling Activity's task on all builds.
+//!     • pickerInFlight guard + MainActivity.onResume() clearPickerGuard() call
+//!       prevent permanent deadlock if even ACTION_OPEN_DOCUMENT fails on a
+//!       particularly aggressive OEM build.
+//!
+//!   All JNI calls are now Kotlin->Rust only. Tauri stale exceptions cannot
+//!   affect Kotlin-managed threads. JavaException is structurally impossible.
 //!   Failure -> silent fallthrough to Tier 3.
 //!
-//! TIER 3: Accessible directory scan  [diagnostic + limited fallback]
-//!   Scans /storage/emulated/0/Download and other known public dirs using
-//!   tokio::fs (zero JNI). Logs all found files to logcat under [FilePicker/T3]
-//!   so the developer can determine whether failures are permission-related or
-//!   picker-mechanism-only. Does NOT auto-select files for the user.
+//! TIER 3: Accessible directory scan + in-app browser signal
+//!   Scans known public directories using tokio::fs (zero JNI). If files are
+//!   found, storage is accessible and the failure is picker-mechanism-only.
+//!   The same scan logic is exposed as pub scan_android_dirs() for the frontend
+//!   to populate an in-app file browser — the primary long-term approach for
+//!   devices where both system pickers fail.
 //!
-//! -- Developer diagnostics ---------------------------------------------------
-//! All tier transitions and failures emit eprintln! visible in logcat under the
-//! "RustStdoutStderr" tag. Filter: `adb logcat -s RustStdoutStderr`.
-//! Tier 3 additionally logs every accessible file path and size.
+//! ── Native file browser (the core path for capable devices) ────────────────
+//!
+//! scan_android_dirs() is the backend for the scan_android_files Tauri command.
+//! When the frontend calls it:
+//!   1. Returns all accessible files across known public directories.
+//!   2. Frontend renders an in-app file browser populated from this list.
+//!   3. User selects files; frontend passes the absolute paths to send_files.
+//!   4. No content:// URIs, no OEM picker, no permission variation.
+//!
+//! This path works on all Android versions where READ_EXTERNAL_STORAGE (API ≤32)
+//! or READ_MEDIA_* (API 33+) is granted. On API 33+ without those permissions,
+//! OpenMultipleDocuments covers the gap (no permission required).
+//!
+//! ── Developer diagnostics ──────────────────────────────────────────────────
+//! All tier transitions emit eprintln! visible in logcat tag RustStdoutStderr.
+//! Filter: `adb logcat -s RustStdoutStderr`
+//! Tier 3 logs every accessible file path and size under [FilePicker/T3].
 
-// -- Conditional imports ------------------------------------------------------
+// ── Conditional imports ───────────────────────────────────────────────────────
 
 #[cfg(target_os = "android")]
 use std::sync::{
@@ -47,7 +76,7 @@ use std::sync::{
 #[cfg(all(target_os = "android", feature = "android-fs"))]
 use tauri_plugin_android_fs::AndroidFsExt;
 
-// -- Public types -------------------------------------------------------------
+// ── Public types ──────────────────────────────────────────────────────────────
 
 /// A file resolved to a plain filesystem path that tokio::fs::File::open can use.
 pub struct ResolvedFile {
@@ -58,58 +87,54 @@ pub struct ResolvedFile {
     pub temp_path: Option<String>,
 }
 
-/// A file returned by the Android picker -- already cached as a plain path.
-#[cfg(target_os = "android")]
+/// A file returned by the Android picker or directory scan — plain absolute path.
 pub struct PickedFile {
     pub name: String,
     pub path: String,
     pub size: u64,
 }
 
-// -- Android statics ----------------------------------------------------------
+// ── Android statics ───────────────────────────────────────────────────────────
 
-/// JavaVM pointer -- seeded by nativeInitJvm (called from RiftAndroidHelper.init).
-/// Retained for potential future JNI use; not required by Tier 2.
+/// JavaVM pointer — seeded by nativeInitJvm (called from RiftAndroidHelper.init).
 #[cfg(target_os = "android")]
 static JVM_GLOBAL: OnceLock<jni::JavaVM> = OnceLock::new();
 
-/// GlobalRef to RiftFilePicker class -- seeded by nativeRegisterPickerClass.
-/// No longer used for triggering (Tier 2 removed that call). Retained as a
-/// reserved handle in case future diagnostic or Tier 1 fallback code needs it.
+/// GlobalRef to RiftFilePicker class — seeded by nativeRegisterPickerClass.
+/// Reserved for potential future diagnostic or Tier 1 fallback code.
 #[cfg(target_os = "android")]
 static PICKER_CLASS: OnceLock<jni::objects::GlobalRef> = OnceLock::new();
 
 /// Tier 2 pick-request signal.
 ///
-/// Rust stores `true` here to request a file pick. Kotlin's polling daemon
-/// thread reads-and-clears it atomically via nativeGetPickRequest().
-/// This AtomicBool replaces the broken env.call_static_method("pickFiles") call.
-/// No JNI involved in the Rust->signal direction.
+/// Rust stores `true` here to request a file pick. Kotlin's RiftPickPoller daemon
+/// reads-and-clears it atomically via nativeGetPickRequest() every 100ms, then
+/// calls launcher.launch(arrayOf("*/*")) [OpenMultipleDocuments] on the main thread.
+///
+/// Zero JNI involved in the Rust->signal direction. This eliminates the Tauri
+/// stale-exception JavaException that afflicted the previous call_static_method approach.
 #[cfg(target_os = "android")]
 static PICK_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// Oneshot result channel -- sender registered by trigger_android_picker_tier2(),
+/// Oneshot result channel — sender registered by trigger_android_picker_tier2(),
 /// consumed by nativeOnFilesSelected() when Kotlin delivers results.
 #[cfg(target_os = "android")]
-static PICK_SENDER: OnceLock<
+static PICK_SENDER: OnceLock
     std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Vec<PickedFile>>>>,
 > = OnceLock::new();
 
-// -- JNI exports: all called FROM Kotlin (safe direction) ---------------------
+// ── JNI exports: all called FROM Kotlin (safe Kotlin→Rust direction) ──────────
 //
-// CRITICAL DIRECTION NOTE: every function below is declared `external fun` in
-// Kotlin and called BY Kotlin on Kotlin-managed threads. This is the SAFE
-// direction. The previous architecture had Rust calling INTO Kotlin
-// (call_static_method) -- that is the direction that fails.
-//
-// Kotlin threads do not carry Tauri's stale JNI exception state.
-// These functions execute on clean threads and simply read/write Rust statics.
+// Every function below is `external fun` in Kotlin and called BY Kotlin on
+// Kotlin-managed threads. This is the safe direction. Kotlin threads carry no
+// Tauri stale exception state. ExceptionCheck inside jni-rs cannot fire on a
+// clean exception state.
 
 /// Called by Kotlin: RiftAndroidHelper.nativeInitJvm()
 /// Stores the JavaVM pointer. Called on the main thread during init.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_nativeInitJvm<
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_nativeInitJvm
     'local,
 >(
     mut env: jni::JNIEnv<'local>,
@@ -118,7 +143,7 @@ pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_native
     match env.get_java_vm() {
         Ok(vm) => {
             if JVM_GLOBAL.set(vm).is_ok() {
-                eprintln!("[AndroidFS] JavaVM stored");
+                eprintln!("[AndroidFS] JavaVM stored in OnceLock");
             }
         }
         Err(e) => eprintln!("[AndroidFS] get_java_vm failed: {e:?}"),
@@ -126,11 +151,11 @@ pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_native
 }
 
 /// Called by Kotlin: RiftFilePicker.nativeRegisterPickerClass()
-/// Caches a GlobalRef to RiftFilePicker for potential future use.
-/// Called on the main thread from RiftFilePicker.register().
+/// Caches a GlobalRef to RiftFilePicker class. Called on the main thread from
+/// RiftFilePicker.register() so the app class loader is active.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeRegisterPickerClass<
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeRegisterPickerClass
     'local,
 >(
     mut env: jni::JNIEnv<'local>,
@@ -139,7 +164,7 @@ pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeReg
     match env.new_global_ref(&class_param) {
         Ok(global_ref) => {
             if PICKER_CLASS.set(global_ref).is_ok() {
-                eprintln!("[FilePicker] RiftFilePicker GlobalRef cached (reserved)");
+                eprintln!("[FilePicker] RiftFilePicker GlobalRef cached");
             }
         }
         Err(e) => eprintln!("[FilePicker] new_global_ref failed: {e:?}"),
@@ -148,22 +173,20 @@ pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeReg
 
 /// Called by Kotlin: RiftFilePicker.nativeGetPickRequest()
 ///
-/// The Kotlin polling daemon calls this every 100ms to check whether Rust
-/// has requested a file pick. Atomically reads-and-clears PICK_REQUESTED.
-/// Returns JNI_TRUE (1) exactly once per trigger_android_picker_tier2() call.
+/// The RiftPickPoller daemon calls this every 100ms. Atomically reads-and-clears
+/// PICK_REQUESTED via compare_exchange(true->false). Returns JNI_TRUE exactly
+/// once per trigger_android_picker_tier2() call.
 ///
-/// DIRECTION: Kotlin -> Rust. Runs on a Kotlin-managed daemon thread.
-/// No Tauri stale-exception pollution. No ExceptionCheck needed.
+/// DIRECTION: Kotlin->Rust. Runs on the RiftPickPoller daemon thread.
+/// No Tauri exception state. No ExceptionCheck risk. Always safe.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeGetPickRequest<
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeGetPickRequest
     'local,
 >(
     _env: jni::JNIEnv<'local>,
     _class: jni::objects::JClass<'local>,
 ) -> jni::sys::jboolean {
-    // compare_exchange: true->false. Returns Ok(true) exactly once; all
-    // subsequent reads see false until Rust sets it again.
     PICK_REQUESTED
         .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok() as jni::sys::jboolean
@@ -171,14 +194,14 @@ pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeGet
 
 /// Called by Kotlin: RiftFilePicker.nativeOnFilesSelected(paths: Array<String>)
 ///
-/// Kotlin calls this after copying all selected files to app cache. Each
-/// element of `paths` is "displayName\nabsolutePath\nsizeBytes".
-/// An empty array signals cancellation or failure -- still resolves the channel.
+/// Kotlin calls this from the worker thread spawned in onPickerResult(), after
+/// copying all selected files to the app's private cache. Each element of `paths`
+/// is "displayName\nabsolutePath\nsizeBytes". An empty array signals cancellation.
 ///
-/// DIRECTION: Kotlin -> Rust. Runs on the worker thread spawned in onPickerResult.
+/// DIRECTION: Kotlin->Rust. Runs on the worker thread spawned in onPickerResult.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeOnFilesSelected<
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeOnFilesSelected
     'local,
 >(
     mut env: jni::JNIEnv<'local>,
@@ -222,28 +245,57 @@ pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeOnF
         } else {
             eprintln!(
                 "[FilePicker] nativeOnFilesSelected: no waiting Rust sender \
-                 (spurious call or prior timeout -- result discarded)"
+                 (spurious call or prior timeout — result discarded)"
             );
         }
     }
 }
 
-// -- Three-tier Android picker dispatcher -------------------------------------
+// ── Public: native directory scanner ─────────────────────────────────────────
 
-/// Main Android file picker entry point. Tries each tier in order, falling
-/// through silently on failure. All failures are logged to logcat.
+/// Scans all known Android public directories and returns every readable file.
 ///
-/// Returns Ok(vec![]) if the user cancelled (all tiers). Only returns Err if
-/// all tiers were tried and could not produce a pick UI or file list.
+/// This is the backend for the `scan_android_files` Tauri command. The frontend
+/// uses the returned list to populate an in-app file browser, giving the user a
+/// reliable file selection path that requires no system picker and no content://
+/// URI machinery.
+///
+/// Directory set is designed for broad coverage across:
+///   • AOSP standard directories (Download, DCIM, Pictures, Documents, etc.)
+///   • OEM path aliases (TECNO/Infinix/Itel sdcard symlinks)
+///   • WhatsApp media directories (primary file-sharing channel in West Africa:
+///     Nigeria, Ghana, Kenya, South Africa; both legacy and API-29+ sandboxed paths)
+///   • Telegram cache directories
+///
+/// Returns up to MAX_SCAN_FILES entries to avoid OOM on low-RAM devices (the
+/// typical 2–3 GB RAM range of TECNO Camon, Infinix Hot, Itel P-series targets).
+///
+/// Accessibility depends on granted permissions:
+///   API ≤ 32: READ_EXTERNAL_STORAGE → full access to /storage/emulated/0/
+///   API 33+:  READ_MEDIA_IMAGES/VIDEO/AUDIO → respective media directories;
+///             Downloads and Documents accessible without permission for
+///             app-created files. OpenMultipleDocuments covers the rest.
+#[cfg(target_os = "android")]
+pub async fn scan_android_dirs() -> anyhow::Result<Vec<PickedFile>> {
+    list_accessible_files().await
+}
+
+/// Desktop stub — scan_android_files command returns USE_DIALOG_PLUGIN on non-Android.
+#[cfg(not(target_os = "android"))]
+pub async fn scan_android_dirs() -> anyhow::Result<Vec<PickedFile>> {
+    Ok(vec![])
+}
+
+// ── Three-tier Android picker dispatcher ─────────────────────────────────────
+
+/// Main Android file picker entry point. Tries tiers in order, falling through
+/// silently on failure. All transitions logged to logcat RustStdoutStderr tag.
 #[cfg(target_os = "android")]
 pub async fn trigger_android_picker(
     _app: &tauri::AppHandle,
 ) -> anyhow::Result<Vec<PickedFile>> {
 
-    // -- Tier 1: tauri-plugin-android-fs --------------------------------------
-    // Proper Tauri plugin infrastructure -- no custom JNI at all.
-    // Activated by building with --features android-fs.
-    // If the crate API differs from below, the compiler error is localised here.
+    // ── Tier 1: tauri-plugin-android-fs ──────────────────────────────────────
     #[cfg(feature = "android-fs")]
     {
         eprintln!("[FilePicker] -- Tier 1: tauri-plugin-android-fs --");
@@ -254,15 +306,14 @@ pub async fn trigger_android_picker(
             }
             Err(e) => {
                 eprintln!("[FilePicker] Tier 1 FAILED -> Tier 2: {e}");
-                // Silent fallthrough
             }
         }
     }
 
-    // -- Tier 2: Poll-based trigger (AtomicBool, no Rust->Kotlin JNI) ---------
-    // This tier is the guaranteed fix for the JavaException root cause.
-    // Works independently of Tier 1 -- always compiled, always available.
-    eprintln!("[FilePicker] -- Tier 2: poll-based trigger (no Rust->Kotlin JNI) --");
+    // ── Tier 2: Poll-based trigger (OpenMultipleDocuments, no Rust->Kotlin JNI) ─
+    eprintln!(
+        "[FilePicker] -- Tier 2: poll-trigger + OpenMultipleDocuments (RiftPickPoller daemon) --"
+    );
     match trigger_android_picker_tier2().await {
         Ok(files) => {
             eprintln!("[FilePicker] Tier 2 success: {} file(s)", files.len());
@@ -270,31 +321,31 @@ pub async fn trigger_android_picker(
         }
         Err(e) => {
             eprintln!("[FilePicker] Tier 2 FAILED -> Tier 3: {e}");
-            // Silent fallthrough
         }
     }
 
-    // -- Tier 3: Accessible directory scan (diagnostic) -----------------------
-    // Scans known public dirs. Logs all readable files to logcat for developer
-    // diagnosis. Does NOT auto-select files (would be surprising/wrong UX).
-    // Returns an informative Err that the frontend displays as the error banner.
+    // ── Tier 3: Accessible directory scan (diagnostic + developer signal) ─────
+    // If scan finds files, storage is accessible and the problem is picker-only.
+    // The same data is available via scan_android_files command for the in-app browser.
     eprintln!("[FilePicker] -- Tier 3: accessible directory scan (diagnostic) --");
     match list_accessible_files().await {
         Ok(files) if !files.is_empty() => {
             eprintln!(
-                "[FilePicker/T3] File system IS accessible ({} file(s) found).",
+                "[FilePicker/T3] Storage IS accessible ({} file(s) found). \
+                 Problem is picker-mechanism-only, NOT a storage permission issue.",
                 files.len()
             );
-            eprintln!(
-                "[FilePicker/T3] Problem is picker-mechanism-only, NOT a storage permission issue."
-            );
-            eprintln!("[FilePicker/T3] Accessible files:");
-            for f in &files {
+            eprintln!("[FilePicker/T3] Accessible files (first 20):");
+            for f in files.iter().take(20) {
                 eprintln!("[FilePicker/T3]   {:>12} B  {}", f.size, f.path);
+            }
+            if files.len() > 20 {
+                eprintln!("[FilePicker/T3]   ... and {} more", files.len() - 20);
             }
             Err(anyhow::anyhow!(
                 "File picker unavailable on this device \
-                 (Tier 1: android-fs plugin, Tier 2: JNI poll -- both failed). \
+                 (Tier 1: android-fs plugin, Tier 2: OpenMultipleDocuments poll-trigger \
+                 -- both failed). \
                  Storage IS accessible: {} file(s) found in known directories. \
                  Check logcat tag RustStdoutStderr for [FilePicker/T3] file list.",
                 files.len()
@@ -302,14 +353,14 @@ pub async fn trigger_android_picker(
         }
         Ok(_) => {
             eprintln!(
-                "[FilePicker/T3] No accessible files in known public dirs. \
-                 Possible causes: READ_EXTERNAL_STORAGE permission denied, \
-                 non-standard storage paths, or sandbox restrictions."
+                "[FilePicker/T3] No accessible files found. Possible causes: \
+                 storage permission denied, non-standard paths, or API-33 sandbox \
+                 without READ_MEDIA_* permissions."
             );
             Err(anyhow::anyhow!(
                 "File picker and storage scan both failed. \
-                 Ensure READ_EXTERNAL_STORAGE permission is granted. \
-                 All three picker tiers exhausted -- see logcat [FilePicker] tags."
+                 Ensure storage permissions are granted. \
+                 All three picker tiers exhausted — see logcat [FilePicker] tags."
             ))
         }
         Err(e) => {
@@ -322,17 +373,8 @@ pub async fn trigger_android_picker(
     }
 }
 
-// -- Tier 1: tauri-plugin-android-fs ------------------------------------------
+// ── Tier 1: tauri-plugin-android-fs ──────────────────────────────────────────
 
-/// Attempts to pick files via tauri-plugin-android-fs.
-///
-/// COMPILE NOTE: if the plugin API has changed since this was written,
-/// method names or types below may need adjustment. The compiler error
-/// will be localised to this function. Common things to check:
-///   - `pick_files` vs `open_file` vs `pick_file`
-///   - `AndroidFsExt` trait method name
-///   - `FileEntry` fields: `.uri()`, `.name()`, `.size()`
-///   - `open_file_readable` return type: `impl Read` vs `impl AsyncRead`
 #[cfg(all(target_os = "android", feature = "android-fs"))]
 async fn try_tier1_android_fs_plugin(
     app: &tauri::AppHandle,
@@ -380,15 +422,11 @@ async fn try_tier1_android_fs_plugin(
 
         let cache_path = cache_dir.join(format!("rift_t1_{ts}_{i}_{safe_name}"));
 
-        let reader_result = app
-            .android_fs()
-            .open_file_readable(&uri_str)
-            .await;
-
+        let reader_result = app.android_fs().open_file_readable(&uri_str).await;
         let mut reader = match reader_result {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[FilePicker/T1] open_file_readable({uri_str}): {e} -- skipping");
+                eprintln!("[FilePicker/T1] open_file_readable({uri_str}): {e} — skipping");
                 continue;
             }
         };
@@ -411,7 +449,7 @@ async fn try_tier1_android_fs_plugin(
 
         match copy_result {
             Ok(0) => {
-                eprintln!("[FilePicker/T1] {display_name}: 0-byte copy -- skipping");
+                eprintln!("[FilePicker/T1] {display_name}: 0-byte copy — skipping");
                 let _ = tokio::fs::remove_file(&cache_path).await;
             }
             Ok(size) => {
@@ -424,7 +462,7 @@ async fn try_tier1_android_fs_plugin(
                 });
             }
             Err(e) => {
-                eprintln!("[FilePicker/T1] Copy error for {display_name}: {e} -- skipping");
+                eprintln!("[FilePicker/T1] Copy error for {display_name}: {e} — skipping");
                 let _ = tokio::fs::remove_file(&cache_path).await;
             }
         }
@@ -433,22 +471,24 @@ async fn try_tier1_android_fs_plugin(
     Ok(picked)
 }
 
-// -- Tier 2: Poll-based (AtomicBool, no Rust->Kotlin JNI) ---------------------
+// ── Tier 2: Poll-based trigger (AtomicBool, no Rust->Kotlin JNI) ─────────────
 
-/// Sets PICK_REQUESTED and waits for Kotlin's polling daemon to detect it,
-/// launch the picker, copy files, and call nativeOnFilesSelected.
+/// Sets PICK_REQUESTED and waits for the RiftPickPoller Kotlin daemon to detect
+/// it, call launcher.launch(arrayOf("*/*")) [OpenMultipleDocuments] on the main
+/// thread, receive the result in onPickerResult, copy URIs to cache, and call
+/// nativeOnFilesSelected.
 ///
-/// The complete absence of Rust->Kotlin JNI calls (call_static_method etc.) is
-/// intentional and is the fix for "RiftFilePicker.pickFiles() JNI failed:
-/// JavaException". See module-level doc for full root-cause analysis.
+/// The complete absence of Rust->Kotlin JNI calls is intentional and is the fix
+/// for "RiftFilePicker.pickFiles() JNI failed: JavaException". See module doc
+/// for the full root-cause chain across all three generations of this code.
 #[cfg(target_os = "android")]
 async fn trigger_android_picker_tier2() -> anyhow::Result<Vec<PickedFile>> {
     use tokio::sync::oneshot;
 
     let (tx, rx) = oneshot::channel::<Vec<PickedFile>>();
 
-    // Register sender BEFORE setting the flag -- the Kotlin thread could
-    // theoretically fire nativeOnFilesSelected before this future proceeds.
+    // Register sender BEFORE setting the flag. The Kotlin daemon could theoretically
+    // fire nativeOnFilesSelected before this future resumes after the store.
     {
         let mutex = PICK_SENDER.get_or_init(|| std::sync::Mutex::new(None));
         let mut guard = mutex
@@ -456,21 +496,25 @@ async fn trigger_android_picker_tier2() -> anyhow::Result<Vec<PickedFile>> {
             .map_err(|_| anyhow::anyhow!("PICK_SENDER mutex poisoned"))?;
         if guard.is_some() {
             anyhow::bail!(
-                "Tier 2: a file picker is already open -- \
+                "Tier 2: a file picker is already open — \
                  complete or cancel the current selection before starting a new one"
             );
         }
         *guard = Some(tx);
     }
 
-    // Signal the Kotlin polling daemon -- zero JNI.
-    // The daemon reads this via nativeGetPickRequest() within ~100ms.
+    // Signal the Kotlin RiftPickPoller daemon — zero JNI.
+    // The daemon reads this via nativeGetPickRequest() within ≤100ms.
     PICK_REQUESTED.store(true, Ordering::SeqCst);
     eprintln!(
-        "[FilePicker/T2] PICK_REQUESTED set -- Kotlin poll thread will launch picker within <=100ms"
+        "[FilePicker/T2] PICK_REQUESTED set — RiftPickPoller will launch \
+         OpenMultipleDocuments picker within ≤100ms"
     );
 
-    // 5-minute timeout: generous for manual file browsing, prevents indefinite hang.
+    // 5-minute timeout: generous for manual file browsing; prevents indefinite hang.
+    // If the picker is closed by clearPickerGuard() in onResume (OEM callback-drop
+    // recovery), nativeOnFilesSelected(emptyArray()) is called and rx resolves
+    // immediately with an empty Vec rather than waiting for this timeout.
     match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
         Ok(Ok(files)) => {
             eprintln!(
@@ -480,7 +524,6 @@ async fn trigger_android_picker_tier2() -> anyhow::Result<Vec<PickedFile>> {
             Ok(files)
         }
         Ok(Err(_channel_dropped)) => {
-            // Sender was dropped without a send -- internal bookkeeping error.
             PICK_REQUESTED.store(false, Ordering::SeqCst);
             Err(anyhow::anyhow!(
                 "Tier 2: result channel dropped unexpectedly \
@@ -488,8 +531,6 @@ async fn trigger_android_picker_tier2() -> anyhow::Result<Vec<PickedFile>> {
             ))
         }
         Err(_timeout) => {
-            // Kotlin never called back. Reasons: polling daemon not started,
-            // launcher not registered, Activity in STOPPED state, or OEM restriction.
             PICK_REQUESTED.store(false, Ordering::SeqCst);
             // Clear stale sender so the next attempt can register a fresh one.
             if let Ok(mut guard) = PICK_SENDER
@@ -500,22 +541,36 @@ async fn trigger_android_picker_tier2() -> anyhow::Result<Vec<PickedFile>> {
             }
             Err(anyhow::anyhow!(
                 "Tier 2: file picker timed out after 5 minutes \
-                 (PICK_REQUESTED was set but nativeOnFilesSelected was never called -- \
-                 check that RiftFilePicker.startPickPoller() ran in MainActivity.onCreate)"
+                 (PICK_REQUESTED was set but nativeOnFilesSelected was never called — \
+                 check that RiftFilePicker.startPickPoller() ran in MainActivity.onCreate, \
+                 and that clearPickerGuard() is called in onResume)"
             ))
         }
     }
 }
 
-// -- Tier 3: Accessible directory scan ----------------------------------------
+// ── Tier 3 / native browser: accessible directory scan ───────────────────────
 
-/// Diagnostic-only scan of known public directories. Zero JNI.
-/// Returns all readable files found; caller logs them and produces a
-/// structured error message for the developer.
+/// Scans known Android public directories. Zero JNI. Called by both Tier 3
+/// (diagnostic in trigger_android_picker) and scan_android_dirs() (frontend
+/// in-app browser backend via the scan_android_files Tauri command).
+///
+/// Directory set covers:
+///   • AOSP standard public dirs
+///   • TECNO/Infinix/Itel sdcard symlinks (Transsion OEM path aliases)
+///   • WhatsApp media (legacy + API-29 sandboxed Android/media path)
+///   • Telegram
+///   • Samsung/OEM Received folder
+///
+/// Capped at MAX_SCAN_FILES (2000) to protect low-RAM devices (2–3 GB, typical
+/// for West African market targets). Files are returned in directory discovery
+/// order; the frontend can sort by name, date, or size.
 #[cfg(target_os = "android")]
 async fn list_accessible_files() -> anyhow::Result<Vec<PickedFile>> {
-    // Known Android public directory paths -- covers AOSP and common OEMs.
+    const MAX_SCAN_FILES: usize = 2000;
+
     let candidate_dirs: &[&str] = &[
+        // ── AOSP standard public directories ─────────────────────────────────
         "/storage/emulated/0/Download",
         "/storage/emulated/0/Downloads",
         "/storage/emulated/0/Documents",
@@ -523,11 +578,36 @@ async fn list_accessible_files() -> anyhow::Result<Vec<PickedFile>> {
         "/storage/emulated/0/Pictures",
         "/storage/emulated/0/Music",
         "/storage/emulated/0/Movies",
+        "/storage/emulated/0/Video",
+        "/storage/emulated/0/Bluetooth",
+        "/storage/emulated/0/Received",
+        // ── OEM path aliases (Transsion/TECNO, Infinix, Itel, Samsung) ───────
+        // These are typically symlinks to /storage/emulated/0/ but some OEM
+        // builds use them as actual distinct paths.
         "/sdcard/Download",
+        "/sdcard/DCIM",
+        "/sdcard/Pictures",
+        "/sdcard/Documents",
+        // ── WhatsApp media paths ─────────────────────────────────────────────
+        // Primary file-sharing channel in Nigeria, Ghana, Kenya, South Africa.
+        // Legacy path (Android ≤9, or older WhatsApp installations):
+        "/storage/emulated/0/WhatsApp/Media/WhatsApp Documents",
+        "/storage/emulated/0/WhatsApp/Media/WhatsApp Images",
+        "/storage/emulated/0/WhatsApp/Media/WhatsApp Video",
+        "/storage/emulated/0/WhatsApp/Media/WhatsApp Audio",
+        // API-29+ sandboxed path (WhatsApp stores media in app-specific dir):
+        "/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents",
+        "/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Images",
+        "/storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Video",
+        // ── Telegram ─────────────────────────────────────────────────────────
+        "/storage/emulated/0/Telegram",
+        "/storage/emulated/0/Telegram Documents",
+        "/storage/emulated/0/Android/media/org.telegram.messenger/Telegram/Telegram Documents",
     ];
 
     let mut found = Vec::new();
-    for dir in candidate_dirs {
+
+    'dir_loop: for dir in candidate_dirs {
         let path = std::path::Path::new(dir);
         if !path.exists() {
             continue;
@@ -538,6 +618,12 @@ async fn list_accessible_files() -> anyhow::Result<Vec<PickedFile>> {
             }
             Ok(mut entries) => {
                 while let Ok(Some(entry)) = entries.next_entry().await {
+                    if found.len() >= MAX_SCAN_FILES {
+                        eprintln!(
+                            "[FilePicker/T3] Scan cap ({MAX_SCAN_FILES} files) reached — stopping"
+                        );
+                        break 'dir_loop;
+                    }
                     let fpath = entry.path();
                     if !fpath.is_file() {
                         continue;
@@ -560,13 +646,24 @@ async fn list_accessible_files() -> anyhow::Result<Vec<PickedFile>> {
             }
         }
     }
+
     Ok(found)
 }
 
-// -- resolve_paths: used by send_files ----------------------------------------
+// ── Desktop stubs ─────────────────────────────────────────────────────────────
+
+/// Desktop: pick_files_for_send returns USE_DIALOG_PLUGIN sentinel; this is never called.
+#[cfg(not(target_os = "android"))]
+pub async fn trigger_android_picker(
+    _app: &tauri::AppHandle,
+) -> anyhow::Result<Vec<PickedFile>> {
+    Err(anyhow::anyhow!("trigger_android_picker: not applicable on desktop"))
+}
+
+// ── resolve_paths: used by send_files ─────────────────────────────────────────
 
 /// Resolves each path to a ResolvedFile for the transfer layer.
-/// All paths arriving here are plain absolute cache paths -- no content:// URIs.
+/// All paths here are plain absolute cache paths — no content:// URIs.
 pub async fn resolve_paths(paths: &[String]) -> anyhow::Result<Vec<ResolvedFile>> {
     let mut out = Vec::with_capacity(paths.len());
     for path in paths {
@@ -591,24 +688,4 @@ async fn resolve_single(path: &str) -> anyhow::Result<ResolvedFile> {
         size,
         temp_path: None,
     })
-}
-
-// -- Desktop stubs ------------------------------------------------------------
-
-/// Desktop platforms do not use this picker -- lib.rs returns USE_DIALOG_PLUGIN.
-/// This stub is only present to satisfy Rust's type checker for pick_files_for_send.
-#[cfg(not(target_os = "android"))]
-pub async fn trigger_android_picker(
-    _app: &tauri::AppHandle,
-) -> anyhow::Result<Vec<PickedFile>> {
-    // Never called on desktop -- pick_files_for_send returns USE_DIALOG_PLUGIN sentinel first.
-    Err(anyhow::anyhow!("trigger_android_picker: not applicable on desktop"))
-}
-
-// Suppress unused type warning on desktop
-#[cfg(not(target_os = "android"))]
-pub struct PickedFile {
-    pub name: String,
-    pub path: String,
-    pub size: u64,
 }

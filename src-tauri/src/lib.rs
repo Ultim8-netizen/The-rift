@@ -28,12 +28,10 @@ async fn get_app_state(state: State<'_, SharedState>) -> Result<AppStatePayload,
 
 /// Android: launches the three-tier file picker, returns staged files.
 ///   Tier 1: tauri-plugin-android-fs (if compiled with --features android-fs)
-///   Tier 2: AtomicBool poll-trigger -> Kotlin daemon -> nativeOnFilesSelected
-///   Tier 3: accessible directory scan (diagnostic only -- returns Err with logcat guidance)
+///   Tier 2: AtomicBool poll-trigger -> RiftPickPoller Kotlin daemon -> OpenMultipleDocuments
+///   Tier 3: accessible directory scan (diagnostic + in-app browser signal)
 ///
-/// Desktop: returns "USE_DIALOG_PLUGIN" sentinel, frontend falls back to tauri-plugin-dialog.
-///
-/// Note: `app: tauri::AppHandle` is required for Tier 1 plugin access.
+/// Desktop: returns "USE_DIALOG_PLUGIN" sentinel; frontend falls back to tauri-plugin-dialog.
 #[tauri::command]
 async fn pick_files_for_send(app: tauri::AppHandle) -> Result<Vec<StagedFile>, String> {
     #[cfg(target_os = "android")]
@@ -59,7 +57,56 @@ async fn pick_files_for_send(app: tauri::AppHandle) -> Result<Vec<StagedFile>, S
 
     #[cfg(not(target_os = "android"))]
     {
-        let _ = app; // suppress unused warning on desktop
+        let _ = app;
+        Err("USE_DIALOG_PLUGIN".to_string())
+    }
+}
+
+/// Scans known Android public directories and returns all readable files.
+///
+/// Used by the frontend to populate an in-app file browser — the primary file
+/// selection path for devices where storage is directly accessible via absolute
+/// paths. The browser lets the user select files; selected paths are passed
+/// directly to send_files, bypassing all content:// URI machinery and OEM picker
+/// variations.
+///
+/// Returns up to 2000 entries (capped in scan_android_dirs to protect low-RAM
+/// devices). The frontend should sort by modification date and allow filtering
+/// by type or name.
+///
+/// Coverage per API level:
+///   API ≤ 32: READ_EXTERNAL_STORAGE → full /storage/emulated/0/ access
+///   API 33+:  READ_MEDIA_IMAGES/VIDEO/AUDIO → respective media directories;
+///             Downloads accessible without permission for third-party files
+///             only via OpenMultipleDocuments — scan returns whatever is readable
+///
+/// Desktop: returns "USE_DIALOG_PLUGIN" error; frontend should not call this on
+/// non-Android platforms.
+#[tauri::command]
+async fn scan_android_files() -> Result<Vec<StagedFile>, String> {
+    #[cfg(target_os = "android")]
+    {
+        let files = android_fs::scan_android_dirs()
+            .await
+            .map_err(|e| {
+                eprintln!("[ScanFiles] Scan error: {e}");
+                e.to_string()
+            })?;
+
+        eprintln!("[ScanFiles] scan_android_dirs returned {} file(s)", files.len());
+
+        Ok(files
+            .into_iter()
+            .map(|f| StagedFile {
+                name:       f.name,
+                path:       f.path,
+                size_bytes: f.size,
+            })
+            .collect())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
         Err("USE_DIALOG_PLUGIN".to_string())
     }
 }
@@ -340,7 +387,7 @@ async fn accept_transfer(
             .map(|d| d.ip.clone())
             .unwrap_or_else(|| {
                 eprintln!(
-                    "[Accept] Sender {} not in device state -- falling back to self-reported IP {}",
+                    "[Accept] Sender {} not in device state — falling back to self-reported IP {}",
                     pending.sender_device.id, pending.sender_device.ip
                 );
                 pending.sender_device.ip.clone()
@@ -356,7 +403,7 @@ async fn accept_transfer(
         .post(&url)
         .send()
         .await
-        .map_err(|e| format!("Accept signal failed -- is the sender still reachable? ({e})"))?;
+        .map_err(|e| format!("Accept signal failed — is the sender still reachable? ({e})"))?;
 
     state.lock().await.pending_transfers.remove(&transfer_id);
     Ok(())
@@ -382,7 +429,7 @@ async fn decline_transfer(
             .unwrap_or_else(|| pending.sender_device.ip.clone());
 
         (ip, pending.sender_device.port)
-    };
+    );
 
     let url = format!("http://{}:{}/decline/{}", sender_ip, sender_port, transfer_id);
 
@@ -451,7 +498,7 @@ async fn detect_hotspot(state: State<'_, SharedState>) -> Result<HotspotInfo, St
     }
 }
 
-// -- App entry point ----------------------------------------------------------
+// ── App entry point ───────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -462,7 +509,7 @@ pub fn run() {
             .unwrap_or(4);
         let worker_threads = (logical_cores / 2).max(2);
         eprintln!(
-            "[Runtime] Android: {logical_cores} logical cores detected, \
+            "[Runtime] Android: {logical_cores} logical cores, \
              capping Tokio at {worker_threads} worker threads"
         );
 
@@ -482,8 +529,6 @@ pub fn run() {
 
     let shared_state = new_shared_state();
 
-    // FIX: `mut` removed. The android-fs conditional now uses a shadowing
-    // `let` rebind instead of assignment, which requires no mutability.
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_fs::init())
@@ -491,9 +536,6 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init());
 
-    // Tier 1: register android-fs plugin when feature is enabled.
-    // Must happen before .manage() and .invoke_handler().
-    // Shadowing rebind: no `mut` needed on the outer `builder`.
     #[cfg(all(target_os = "android", feature = "android-fs"))]
     let builder = {
         eprintln!("[Runtime] tauri-plugin-android-fs registered (Tier 1 active)");
@@ -506,6 +548,7 @@ pub fn run() {
             get_app_state,
             get_file_metadata,
             pick_files_for_send,
+            scan_android_files,
             start_discovery,
             rescan,
             send_files,
