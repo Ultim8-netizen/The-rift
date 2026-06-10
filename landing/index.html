@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="The Rift — direct device-to-device file transfer. No internet. No cloud. No limits." />
-  
-  <!-- Open Graph / Facebook -->
-  <meta property="og:title" content="The Rift — by abyssprotocol" />
-  <meta property="og:description" content="Drop files. Pick a device. Done. No internet required." />
+  <meta name="description" content="The Rift v1.1.1 — direct device-to-device file transfer. No internet. No cloud. No accounts. Ever." />
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="The Rift v1.1.1 — by abyssprotocol" />
+  <meta property="og:description" content="Multi-stream TCP. BLAKE3 integrity. Triple-layer discovery. PC and Android. No internet. No cloud. No accounts. Ever." />
   <meta property="og:image" content="https://the-rift-mauve.vercel.app/og-image.png" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
@@ -16,24 +16,29 @@
   <!-- Twitter -->
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:image" content="https://the-rift-mauve.vercel.app/og-image.png" />
-  
+
   <meta name="theme-color" content="#08080e" />
-  <title>The Rift — by abyssprotocol</title>
+  <title>The Rift v1.1.1 — by abyssprotocol</title>
+
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --bg:        #08080e;
-      --surface:   #0e0e16;
-      --surface2:  #14142a;
-      --border:    #26263c;
-      --accent:    #00c8ff;
-      --accent2:   #8750ff;
-      --text:      #e1e8f2;
-      --muted:     #58687e;
-      --success:   #22c55e;
-      --glow:      rgba(0,200,255,0.18);
-      --glow-lg:   rgba(0,200,255,0.32);
+      --bg:         #08080e;
+      --surface:    #0d0d1c;
+      --surface2:   #111126;
+      --border:     #1a1a32;
+      --border-lit: rgba(0,200,255,0.16);
+      --accent:     #00c8ff;
+      --accent2:    #8750ff;
+      --accent3:    #00ffaa;
+      --android:    #6dda6d;
+      --text:       #dde6f2;
+      --muted:      #52627a;
+      --r-sm:       10px;
+      --r:          20px;
+      --r-lg:       28px;
+      --r-xl:       36px;
     }
 
     html { scroll-behavior: smooth; }
@@ -41,162 +46,257 @@
     body {
       background: var(--bg);
       color: var(--text);
-      font-family: "JetBrains Mono", "Fira Code", "Courier New", monospace;
+      font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", "Courier New", monospace;
       min-height: 100vh;
       overflow-x: hidden;
       -webkit-font-smoothing: antialiased;
     }
 
-    /* ── Ambient orbs ── */
-    .orbs {
+    /* ─────── AMBIENT BACKGROUND ─────── */
+    .bg-layer {
       position: fixed;
       inset: 0;
       pointer-events: none;
       z-index: 0;
       overflow: hidden;
     }
+
     .orb {
       position: absolute;
       border-radius: 50%;
-      filter: blur(80px);
-      opacity: 0.18;
-      animation: orbFloat 12s ease-in-out infinite;
+      filter: blur(100px);
+      animation: drift 16s ease-in-out infinite;
     }
     .orb-1 {
-      width: 520px; height: 520px;
-      background: radial-gradient(circle, #00c8ff, transparent 70%);
-      top: -160px; left: -160px;
+      width: 680px; height: 680px;
+      background: radial-gradient(circle, rgba(0,200,255,0.2) 0%, transparent 65%);
+      top: -220px; left: -200px;
       animation-delay: 0s;
     }
     .orb-2 {
-      width: 440px; height: 440px;
-      background: radial-gradient(circle, #8750ff, transparent 70%);
-      bottom: -120px; right: -120px;
-      animation-delay: -6s;
+      width: 560px; height: 560px;
+      background: radial-gradient(circle, rgba(135,80,255,0.18) 0%, transparent 65%);
+      bottom: -180px; right: -180px;
+      animation-delay: -8s;
     }
     .orb-3 {
-      width: 300px; height: 300px;
-      background: radial-gradient(circle, #00c8ff, transparent 70%);
-      top: 50%; left: 50%;
+      width: 400px; height: 400px;
+      background: radial-gradient(circle, rgba(0,200,255,0.08) 0%, transparent 65%);
+      top: 42%; left: 50%;
       transform: translate(-50%, -50%);
-      opacity: 0.08;
-      animation-delay: -3s;
+      animation-delay: -4s;
     }
-    @keyframes orbFloat {
+    .orb-4 {
+      width: 320px; height: 320px;
+      background: radial-gradient(circle, rgba(0,255,170,0.09) 0%, transparent 65%);
+      top: 28%; right: -60px;
+      animation-delay: -6s;
+    }
+    @keyframes drift {
       0%, 100% { transform: translate(0, 0) scale(1); }
-      33%       { transform: translate(24px, -18px) scale(1.04); }
-      66%       { transform: translate(-14px, 22px) scale(0.97); }
+      33%       { transform: translate(28px, -24px) scale(1.06); }
+      66%       { transform: translate(-18px, 28px) scale(0.95); }
     }
 
-    /* ── Layout ── */
+    /* Dot grid overlay */
+    .bg-dots {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+      background-image: radial-gradient(circle, rgba(0,200,255,0.06) 1px, transparent 1px);
+      background-size: 40px 40px;
+      mask-image: radial-gradient(ellipse 90% 80% at 50% 50%, black 10%, transparent 80%);
+    }
+
+    /* ─────── LAYOUT ─────── */
     .page {
       position: relative;
       z-index: 1;
       display: flex;
       flex-direction: column;
       align-items: center;
-      padding: 0 24px 80px;
+      padding: 0 24px 100px;
     }
 
-    /* ── Nav ── */
+    /* ─────── NAV ─────── */
     nav {
       width: 100%;
-      max-width: 860px;
+      max-width: 920px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 28px 0 0;
-      margin-bottom: 80px;
+      padding: 32px 0 0;
+      margin-bottom: 96px;
     }
+
     .nav-brand {
-      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      font-size: 12px;
       font-weight: 700;
-      letter-spacing: 0.18em;
+      letter-spacing: 0.24em;
       text-transform: uppercase;
-      background: linear-gradient(120deg, var(--accent), var(--accent2));
+      background: linear-gradient(110deg, var(--accent), var(--accent2));
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       background-clip: text;
+      text-decoration: none;
     }
-    .nav-links { display: flex; gap: 24px; }
+
+    .nav-pulse {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 8px var(--accent), 0 0 16px rgba(0,200,255,0.3);
+      animation: blink 2.2s ease-in-out infinite;
+      flex-shrink: 0;
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.35; transform: scale(0.65); }
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
     .nav-links a {
-      font-size: 11px;
-      letter-spacing: 0.14em;
+      font-size: 10px;
+      letter-spacing: 0.16em;
       text-transform: uppercase;
       color: var(--muted);
       text-decoration: none;
-      transition: color 0.15s;
+      padding: 8px 14px;
+      border-radius: var(--r-sm);
+      border: 1px solid transparent;
+      transition: all 0.18s;
     }
-    .nav-links a:hover { color: var(--text); }
+    .nav-links a:hover {
+      color: var(--text);
+      background: rgba(0,200,255,0.06);
+      border-color: var(--border-lit);
+    }
+    .nav-gh {
+      border-color: var(--border) !important;
+      color: var(--text) !important;
+    }
+    .nav-gh:hover {
+      border-color: var(--border-lit) !important;
+      background: rgba(0,200,255,0.06) !important;
+    }
 
-    /* ── Hero ── */
+    /* ─────── HERO ─────── */
     .hero {
       text-align: center;
-      margin-bottom: 72px;
-      max-width: 680px;
+      margin-bottom: 56px;
+      max-width: 740px;
     }
 
     .hero-badge {
       display: inline-flex;
       align-items: center;
-      gap: 7px;
-      font-size: 10px;
-      letter-spacing: 0.22em;
+      gap: 8px;
+      font-size: 9px;
+      letter-spacing: 0.26em;
       text-transform: uppercase;
       color: var(--accent);
-      border: 1px solid rgba(0,200,255,0.24);
-      background: rgba(0,200,255,0.06);
+      border: 1px solid rgba(0,200,255,0.3);
+      background: rgba(0,200,255,0.07);
       border-radius: 999px;
-      padding: 6px 14px;
-      margin-bottom: 32px;
+      padding: 7px 18px;
+      margin-bottom: 38px;
+      backdrop-filter: blur(16px);
+      box-shadow: 0 0 24px rgba(0,200,255,0.12), inset 0 1px 0 rgba(255,255,255,0.06);
     }
-    .hero-badge::before {
-      content: '';
+    .badge-dot {
       width: 6px; height: 6px;
       border-radius: 50%;
       background: var(--accent);
-      animation: pulse 2s ease-in-out infinite;
-    }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50%       { opacity: 0.4; transform: scale(0.7); }
+      box-shadow: 0 0 6px var(--accent);
+      animation: blink 2.2s ease-in-out infinite;
     }
 
+    .hero-eyebrow {
+      font-size: 9px;
+      letter-spacing: 0.32em;
+      text-transform: uppercase;
+      color: rgba(82,98,122,0.5);
+      margin-bottom: 8px;
+    }
+
+    .hero-title-wrap {
+      position: relative;
+      display: inline-block;
+      margin-bottom: 26px;
+    }
+    .hero-glow {
+      position: absolute;
+      inset: -24px;
+      background: radial-gradient(ellipse 65% 50% at 50% 60%, rgba(0,200,255,0.14), transparent 70%);
+      pointer-events: none;
+      z-index: -1;
+    }
     .hero-title {
-      font-size: clamp(52px, 9vw, 96px);
+      font-size: clamp(62px, 12vw, 112px);
       font-weight: 900;
-      letter-spacing: -0.04em;
-      line-height: 0.92;
-      margin-bottom: 24px;
-      background: linear-gradient(130deg, #ffffff 30%, var(--accent) 70%, var(--accent2));
+      letter-spacing: -0.055em;
+      line-height: 0.86;
+      background: linear-gradient(128deg, #ffffff 15%, #b8deff 40%, var(--accent) 62%, var(--accent2) 90%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       background-clip: text;
     }
 
     .hero-sub {
-      font-size: 13px;
+      font-size: 12.5px;
       color: var(--muted);
-      line-height: 1.8;
-      letter-spacing: 0.04em;
-      margin-bottom: 12px;
+      line-height: 1.95;
+      letter-spacing: 0.05em;
+      margin-bottom: 10px;
     }
-
     .hero-byline {
-      font-size: 10px;
-      letter-spacing: 0.28em;
+      font-size: 8.5px;
+      letter-spacing: 0.36em;
       text-transform: uppercase;
-      color: rgba(88,104,126,0.55);
-      margin-bottom: 48px;
+      color: rgba(82,98,122,0.4);
+      margin-bottom: 44px;
     }
 
-    /* ── Download cards ── */
+    /* Platform pill row */
+    .platform-row {
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-bottom: 40px;
+    }
+    .platform-pill {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 9.5px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      background: rgba(13,13,28,0.72);
+      border-radius: 999px;
+      padding: 6px 14px;
+      backdrop-filter: blur(12px);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+    }
+    .platform-pill-icon { opacity: 0.75; }
+
+    /* ─────── DOWNLOAD BUTTONS ─────── */
     .downloads {
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 10px;
       width: 100%;
-      max-width: 360px;
+      max-width: 390px;
       margin: 0 auto;
     }
 
@@ -204,60 +304,100 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 15px 20px;
-      border-radius: 14px;
+      padding: 16px 22px;
+      border-radius: var(--r);
       text-decoration: none;
-      font-size: 12px;
+      font-size: 11px;
       font-family: inherit;
       font-weight: 700;
-      letter-spacing: 0.08em;
+      letter-spacing: 0.1em;
       text-transform: uppercase;
-      transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+      transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
       position: relative;
       overflow: hidden;
     }
-    .btn::before {
+
+    /* Shimmer sweep on hover */
+    .btn::after {
       content: '';
       position: absolute;
-      inset: 0;
-      border-radius: inherit;
-      padding: 1px;
-      background: linear-gradient(135deg, rgba(0,200,255,0.5), rgba(135,80,255,0.3), transparent 55%);
-      -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-      mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-      -webkit-mask-composite: xor;
-      mask-composite: exclude;
+      top: 0; left: -115%;
+      width: 65%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.13), transparent);
+      transform: skewX(-18deg);
+      transition: left 0.52s ease;
       pointer-events: none;
     }
+    .btn:hover::after { left: 145%; }
+
     .btn-tag {
-      font-size: 10px;
-      font-weight: 400;
+      font-size: 9px;
+      font-weight: 500;
       opacity: 0.6;
-      letter-spacing: 0.05em;
+      letter-spacing: 0.06em;
     }
 
-    .btn-primary {
-      background: linear-gradient(135deg, var(--accent), #0090bb);
-      color: var(--bg);
-      box-shadow: 0 0 28px rgba(0,200,255,0.28);
+    /* Windows primary */
+    .btn-win {
+      background: linear-gradient(135deg, #00c8ff 0%, #009fc8 50%, #007aa8 100%);
+      color: #040810;
+      box-shadow:
+        0 0 36px rgba(0,200,255,0.34),
+        0 4px 22px rgba(0,0,0,0.42),
+        inset 0 1px 0 rgba(255,255,255,0.32);
     }
-    .btn-primary:hover {
-      transform: translateY(-2px) scale(1.01);
-      box-shadow: 0 0 48px rgba(0,200,255,0.42);
+    .btn-win:hover {
+      transform: translateY(-3px) scale(1.012);
+      box-shadow:
+        0 0 60px rgba(0,200,255,0.5),
+        0 8px 30px rgba(0,0,0,0.42),
+        inset 0 1px 0 rgba(255,255,255,0.32);
     }
-    .btn-primary::before { display: none; }
 
-    .btn-secondary {
-      background: rgba(14,14,22,0.85);
+    /* Windows MSI secondary */
+    .btn-msi {
+      background: linear-gradient(145deg, rgba(16,16,38,0.94), rgba(10,10,24,0.88));
       color: var(--text);
+      border: 1px solid rgba(0,200,255,0.18);
       backdrop-filter: blur(20px);
+      box-shadow:
+        0 4px 18px rgba(0,0,0,0.32),
+        inset 0 1px 0 rgba(255,255,255,0.05);
     }
-    .btn-secondary:hover {
+    .btn-msi:hover {
       transform: translateY(-2px);
-      background: rgba(20,20,42,0.95);
-      box-shadow: 0 0 18px rgba(0,200,255,0.12);
+      border-color: rgba(0,200,255,0.38);
+      box-shadow:
+        0 0 24px rgba(0,200,255,0.14),
+        0 6px 22px rgba(0,0,0,0.36),
+        inset 0 1px 0 rgba(255,255,255,0.08);
     }
 
+    /* Android */
+    .btn-apk {
+      background: linear-gradient(135deg, #142414 0%, #0d180d 100%);
+      color: var(--android);
+      border: 1px solid rgba(109,218,109,0.22);
+      box-shadow:
+        0 0 22px rgba(109,218,109,0.1),
+        0 4px 18px rgba(0,0,0,0.38),
+        inset 0 1px 0 rgba(255,255,255,0.04);
+    }
+    .btn-apk:hover {
+      transform: translateY(-2px);
+      border-color: rgba(109,218,109,0.42);
+      color: #88ee88;
+      box-shadow:
+        0 0 38px rgba(109,218,109,0.2),
+        0 6px 24px rgba(0,0,0,0.4),
+        inset 0 1px 0 rgba(255,255,255,0.06);
+    }
+    .btn-apk::after {
+      background: linear-gradient(90deg, transparent, rgba(109,218,109,0.1), transparent);
+    }
+
+    /* Ghost */
     .btn-ghost {
       background: transparent;
       color: var(--muted);
@@ -267,160 +407,303 @@
     }
     .btn-ghost:hover {
       color: var(--text);
-      border-color: rgba(0,200,255,0.3);
+      border-color: rgba(0,200,255,0.28);
+      background: rgba(0,200,255,0.04);
     }
-    .btn-ghost::before { display: none; }
 
-    /* ── Divider ── */
+    /* ─────── DIVIDER ─────── */
     .divider {
       width: 100%;
-      max-width: 860px;
+      max-width: 920px;
       height: 1px;
-      background: linear-gradient(90deg, transparent, var(--border), transparent);
-      margin: 72px 0;
+      background: linear-gradient(90deg, transparent, rgba(0,200,255,0.2), rgba(135,80,255,0.14), transparent);
+      margin: 80px 0;
     }
 
-    /* ── Features ── */
-    .features-title {
-      font-size: 10px;
-      letter-spacing: 0.24em;
-      text-transform: uppercase;
-      color: var(--muted);
-      text-align: center;
-      margin-bottom: 40px;
+    /* ─────── STATS STRIP ─────── */
+    .stats-strip {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: center;
+      margin-top: 48px;
     }
 
-    .features {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-      gap: 16px;
-      width: 100%;
-      max-width: 860px;
-      margin-bottom: 72px;
+    .stat-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 18px;
+      border-radius: 999px;
+      background: rgba(12,12,26,0.82);
+      border: 1px solid var(--border);
+      backdrop-filter: blur(18px);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04), 0 2px 12px rgba(0,0,0,0.22);
+      transition: all 0.18s;
     }
-
-    .feature {
-      background: rgba(14,14,22,0.72);
-      backdrop-filter: blur(24px);
-      border: 1px solid rgba(38,38,60,0.7);
-      border-radius: 18px;
-      padding: 24px;
-      position: relative;
-      overflow: hidden;
-      transition: all 0.2s ease;
+    .stat-pill:hover {
+      border-color: var(--border-lit);
+      box-shadow: 0 0 18px rgba(0,200,255,0.09), inset 0 1px 0 rgba(255,255,255,0.04);
     }
-    .feature::before {
-      content: '';
-      position: absolute;
-      inset: 0;
-      border-radius: inherit;
-      padding: 1px;
-      background: linear-gradient(135deg, rgba(0,200,255,0.35), rgba(135,80,255,0.18), transparent 55%);
-      -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-      mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-      -webkit-mask-composite: xor;
-      mask-composite: exclude;
-      pointer-events: none;
-    }
-    .feature:hover {
-      transform: translateY(-3px);
-      border-color: rgba(0,200,255,0.25);
-      box-shadow: 0 8px 32px rgba(0,0,0,0.3), 0 0 18px rgba(0,200,255,0.08);
-    }
-
-    .feature-icon {
-      font-size: 20px;
-      margin-bottom: 14px;
-      display: block;
-    }
-
-    .feature-title {
+    .stat-val {
       font-size: 11px;
       font-weight: 700;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-      color: var(--text);
-      margin-bottom: 8px;
+      color: var(--accent);
     }
-
-    .feature-desc {
-      font-size: 11px;
-      color: var(--muted);
-      line-height: 1.75;
-      letter-spacing: 0.02em;
-    }
-
-    /* ── How it works ── */
-    .steps {
-      width: 100%;
-      max-width: 860px;
-      margin-bottom: 72px;
-    }
-
-    .steps-title {
-      font-size: 10px;
-      letter-spacing: 0.24em;
+    .stat-sep { width: 1px; height: 13px; background: var(--border); }
+    .stat-lbl {
+      font-size: 8.5px;
+      letter-spacing: 0.18em;
       text-transform: uppercase;
       color: var(--muted);
+    }
+
+    /* ─────── SECTION HEADERS ─────── */
+    .s-header {
       text-align: center;
-      margin-bottom: 40px;
+      margin-bottom: 48px;
     }
-
-    .steps-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 2px;
+    .s-eyebrow {
+      display: block;
+      font-size: 8.5px;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 10px;
+      opacity: 0.75;
     }
-
-    .step {
-      background: rgba(14,14,22,0.72);
-      backdrop-filter: blur(24px);
-      border: 1px solid rgba(38,38,60,0.6);
-      padding: 28px 24px;
-      position: relative;
-    }
-    .step:first-child { border-radius: 18px 0 0 18px; }
-    .step:last-child  { border-radius: 0 18px 18px 0; }
-
-    .step-num {
-      font-size: 32px;
-      font-weight: 900;
-      letter-spacing: -0.04em;
-      background: linear-gradient(120deg, var(--accent), var(--accent2));
+    .s-title {
+      font-size: clamp(18px, 3.2vw, 28px);
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      background: linear-gradient(120deg, var(--text), rgba(221,230,242,0.55));
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       background-clip: text;
-      margin-bottom: 12px;
+    }
+
+    /* ─────── FEATURE CARDS ─────── */
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(265px, 1fr));
+      gap: 13px;
+      width: 100%;
+      max-width: 920px;
+    }
+
+    .feature {
+      background: linear-gradient(148deg, rgba(17,17,38,0.9) 0%, rgba(9,9,20,0.72) 100%);
+      backdrop-filter: blur(30px);
+      -webkit-backdrop-filter: blur(30px);
+      border: 1px solid rgba(26,26,50,0.95);
+      border-radius: var(--r-lg);
+      padding: 28px 26px 26px;
+      position: relative;
+      overflow: hidden;
+      transition: all 0.24s cubic-bezier(0.16, 1, 0.3, 1);
+      box-shadow:
+        0 4px 28px rgba(0,0,0,0.3),
+        inset 0 1px 0 rgba(255,255,255,0.05),
+        inset 0 -1px 0 rgba(0,0,0,0.12);
+    }
+
+    /* Top gloss line */
+    .feature::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 18%; right: 18%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(0,200,255,0.45), transparent);
+      border-radius: 999px;
+    }
+    /* Corner radiance */
+    .feature::after {
+      content: '';
+      position: absolute;
+      top: 0; right: 0;
+      width: 90px; height: 90px;
+      background: radial-gradient(circle at top right, rgba(0,200,255,0.09), transparent 70%);
+      border-radius: 0 var(--r-lg) 0 0;
+    }
+
+    .feature:hover {
+      transform: translateY(-5px);
+      border-color: rgba(0,200,255,0.24);
+      box-shadow:
+        0 16px 48px rgba(0,0,0,0.38),
+        0 0 28px rgba(0,200,255,0.1),
+        inset 0 1px 0 rgba(255,255,255,0.07);
+    }
+
+    .feature-icon {
+      font-size: 21px;
+      margin-bottom: 16px;
       display: block;
       line-height: 1;
     }
+    .feature-title {
+      font-size: 10.5px;
+      font-weight: 700;
+      letter-spacing: 0.17em;
+      text-transform: uppercase;
+      color: var(--text);
+      margin-bottom: 10px;
+    }
+    .feature-desc {
+      font-size: 10.5px;
+      color: var(--muted);
+      line-height: 1.82;
+      letter-spacing: 0.02em;
+    }
+    .feature-new {
+      display: inline-flex;
+      margin-top: 14px;
+      font-size: 8.5px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--accent3);
+      border: 1px solid rgba(0,255,170,0.22);
+      border-radius: 999px;
+      padding: 3px 10px;
+      opacity: 0.85;
+    }
 
-    .step-label {
-      font-size: 11px;
+    /* ─────── CHANGELOG ─────── */
+    .changelog-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(265px, 1fr));
+      gap: 13px;
+      width: 100%;
+      max-width: 920px;
+    }
+
+    .cl-card {
+      background: linear-gradient(148deg, rgba(14,14,30,0.94), rgba(9,9,20,0.8));
+      border: 1px solid rgba(26,26,50,0.9);
+      border-radius: var(--r-lg);
+      padding: 26px;
+      backdrop-filter: blur(26px);
+      position: relative;
+      overflow: hidden;
+      box-shadow:
+        0 4px 22px rgba(0,0,0,0.28),
+        inset 0 1px 0 rgba(255,255,255,0.04);
+    }
+
+    .cl-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 18%; right: 18%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(0,255,170,0.38), transparent);
+      border-radius: 999px;
+    }
+
+    .cl-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 9.5px;
+      font-weight: 700;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--accent3);
+      margin-bottom: 18px;
+    }
+    .cl-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--accent3);
+      box-shadow: 0 0 7px var(--accent3);
+      flex-shrink: 0;
+    }
+
+    .cl-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+    }
+    .cl-item {
+      font-size: 10px;
       color: var(--muted);
       line-height: 1.65;
-      letter-spacing: 0.03em;
-    }
-
-    /* ── Themes preview ── */
-    .themes-section {
-      width: 100%;
-      max-width: 860px;
-      margin-bottom: 72px;
-    }
-
-    .themes-title {
-      font-size: 10px;
-      letter-spacing: 0.24em;
-      text-transform: uppercase;
-      color: var(--muted);
-      text-align: center;
-      margin-bottom: 40px;
-    }
-
-    .themes-grid {
+      letter-spacing: 0.02em;
       display: flex;
+      gap: 10px;
+    }
+    .cl-item::before {
+      content: '→';
+      color: rgba(0,200,255,0.38);
+      flex-shrink: 0;
+      font-size: 10px;
+      margin-top: 1px;
+    }
+
+    /* ─────── STEPS ─────── */
+    .steps-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(196px, 1fr));
       gap: 12px;
+      width: 100%;
+      max-width: 920px;
+    }
+
+    .step {
+      background: linear-gradient(148deg, rgba(17,17,38,0.9), rgba(9,9,20,0.74));
+      backdrop-filter: blur(26px);
+      -webkit-backdrop-filter: blur(26px);
+      border: 1px solid rgba(26,26,50,0.88);
+      border-radius: var(--r-lg);
+      padding: 30px 26px;
+      position: relative;
+      overflow: hidden;
+      transition: all 0.22s ease;
+      box-shadow:
+        0 4px 20px rgba(0,0,0,0.26),
+        inset 0 1px 0 rgba(255,255,255,0.045);
+    }
+    .step::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 18%; right: 18%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(135,80,255,0.42), transparent);
+      border-radius: 999px;
+    }
+    .step:hover {
+      transform: translateY(-4px);
+      border-color: rgba(135,80,255,0.26);
+      box-shadow:
+        0 12px 36px rgba(0,0,0,0.34),
+        0 0 22px rgba(135,80,255,0.1),
+        inset 0 1px 0 rgba(255,255,255,0.065);
+    }
+
+    .step-num {
+      font-size: 40px;
+      font-weight: 900;
+      letter-spacing: -0.055em;
+      background: linear-gradient(118deg, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 14px;
+      display: block;
+      line-height: 1;
+      opacity: 0.82;
+    }
+    .step-text {
+      font-size: 10.5px;
+      color: var(--muted);
+      line-height: 1.78;
+      letter-spacing: 0.025em;
+    }
+
+    /* ─────── THEMES ─────── */
+    .themes-row {
+      display: flex;
+      gap: 16px;
       flex-wrap: wrap;
       justify-content: center;
     }
@@ -431,293 +714,690 @@
       align-items: center;
       gap: 10px;
     }
-
     .swatch-disc {
-      width: 48px;
-      height: 48px;
-      border-radius: 14px;
+      width: 54px; height: 54px;
+      border-radius: 17px;
       position: relative;
-      transition: transform 0.15s ease;
+      transition: all 0.22s ease;
       cursor: default;
     }
-    .swatch-disc:hover { transform: scale(1.12); }
-
+    .swatch-disc:hover {
+      transform: scale(1.18) translateY(-3px);
+    }
     .swatch-dot {
       position: absolute;
-      bottom: 7px;
-      right: 7px;
-      width: 8px;
-      height: 8px;
+      bottom: 8px; right: 8px;
+      width: 10px; height: 10px;
       border-radius: 50%;
     }
-
     .swatch-label {
-      font-size: 9px;
-      letter-spacing: 0.18em;
+      font-size: 8px;
+      letter-spacing: 0.22em;
       text-transform: uppercase;
       color: var(--muted);
     }
 
-    /* ── CTA ── */
-    .cta {
-      text-align: center;
-      margin-bottom: 72px;
+    /* ─────── PLATFORMS ─────── */
+    .platforms-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+      gap: 13px;
+      width: 100%;
+      max-width: 920px;
     }
 
+    .plat-card {
+      background: linear-gradient(148deg, rgba(15,15,34,0.95), rgba(9,9,22,0.82));
+      border: 1px solid rgba(26,26,50,0.9);
+      border-radius: var(--r-xl);
+      padding: 40px 34px;
+      text-align: center;
+      backdrop-filter: blur(30px);
+      -webkit-backdrop-filter: blur(30px);
+      position: relative;
+      overflow: hidden;
+      transition: all 0.26s cubic-bezier(0.16, 1, 0.3, 1);
+      box-shadow:
+        0 8px 36px rgba(0,0,0,0.34),
+        inset 0 1px 0 rgba(255,255,255,0.05);
+    }
+
+    .plat-card.pc::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--accent), var(--accent2), transparent);
+      border-radius: 999px 999px 0 0;
+    }
+    .plat-card.pc::after {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: radial-gradient(ellipse 70% 40% at 50% 0%, rgba(0,200,255,0.07), transparent 60%);
+      pointer-events: none;
+    }
+    .plat-card.pc:hover {
+      transform: translateY(-5px);
+      border-color: rgba(0,200,255,0.28);
+      box-shadow:
+        0 20px 56px rgba(0,0,0,0.42),
+        0 0 36px rgba(0,200,255,0.12),
+        inset 0 1px 0 rgba(255,255,255,0.07);
+    }
+
+    .plat-card.droid::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--android), transparent);
+      border-radius: 999px 999px 0 0;
+    }
+    .plat-card.droid::after {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: radial-gradient(ellipse 70% 40% at 50% 0%, rgba(109,218,109,0.06), transparent 60%);
+      pointer-events: none;
+    }
+    .plat-card.droid:hover {
+      transform: translateY(-5px);
+      border-color: rgba(109,218,109,0.25);
+      box-shadow:
+        0 20px 56px rgba(0,0,0,0.42),
+        0 0 32px rgba(109,218,109,0.1),
+        inset 0 1px 0 rgba(255,255,255,0.07);
+    }
+
+    .plat-icon {
+      font-size: 38px;
+      margin-bottom: 14px;
+      display: block;
+      position: relative;
+      z-index: 1;
+    }
+    .plat-name {
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--text);
+      margin-bottom: 8px;
+      position: relative;
+      z-index: 1;
+    }
+    .plat-sub {
+      font-size: 10px;
+      color: var(--muted);
+      margin-bottom: 26px;
+      line-height: 1.72;
+      letter-spacing: 0.03em;
+      position: relative;
+      z-index: 1;
+    }
+
+    .plat-btns {
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+      flex-wrap: wrap;
+      position: relative;
+      z-index: 1;
+    }
+
+    .pb {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 11px 22px;
+      border-radius: var(--r);
+      text-decoration: none;
+      font-size: 10px;
+      font-family: inherit;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      transition: all 0.2s ease;
+      position: relative;
+      overflow: hidden;
+    }
+    .pb::after {
+      content: '';
+      position: absolute;
+      top: 0; left: -110%;
+      width: 65%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.12), transparent);
+      transform: skewX(-18deg);
+      transition: left 0.48s ease;
+    }
+    .pb:hover::after { left: 145%; }
+
+    .pb-win-solid {
+      background: linear-gradient(135deg, var(--accent), #0090bb);
+      color: #040810;
+      box-shadow: 0 0 26px rgba(0,200,255,0.32), inset 0 1px 0 rgba(255,255,255,0.28);
+    }
+    .pb-win-solid:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 0 44px rgba(0,200,255,0.48), inset 0 1px 0 rgba(255,255,255,0.3);
+    }
+    .pb-win-outline {
+      background: rgba(0,200,255,0.07);
+      color: var(--accent);
+      border: 1px solid rgba(0,200,255,0.28);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+    }
+    .pb-win-outline:hover {
+      transform: translateY(-2px);
+      background: rgba(0,200,255,0.12);
+      border-color: rgba(0,200,255,0.48);
+    }
+    .pb-droid {
+      background: linear-gradient(135deg, #1c3a1c, #122012);
+      color: var(--android);
+      border: 1px solid rgba(109,218,109,0.26);
+      box-shadow: 0 0 18px rgba(109,218,109,0.12), inset 0 1px 0 rgba(255,255,255,0.04);
+    }
+    .pb-droid:hover {
+      transform: translateY(-2px);
+      color: #88ee88;
+      box-shadow: 0 0 32px rgba(109,218,109,0.24), inset 0 1px 0 rgba(255,255,255,0.06);
+      border-color: rgba(109,218,109,0.44);
+    }
+    .pb-droid::after {
+      background: linear-gradient(90deg, transparent, rgba(109,218,109,0.1), transparent);
+    }
+
+    /* ─────── CTA ─────── */
+    .cta {
+      text-align: center;
+      max-width: 580px;
+    }
     .cta-title {
-      font-size: clamp(22px, 4vw, 36px);
+      font-size: clamp(26px, 5vw, 46px);
       font-weight: 900;
-      letter-spacing: -0.03em;
-      margin-bottom: 12px;
-      background: linear-gradient(120deg, var(--text), var(--accent));
+      letter-spacing: -0.04em;
+      line-height: 1.05;
+      margin-bottom: 14px;
+      background: linear-gradient(120deg, var(--text) 25%, var(--accent) 80%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       background-clip: text;
     }
-
     .cta-sub {
-      font-size: 11px;
+      font-size: 10.5px;
       color: var(--muted);
-      margin-bottom: 32px;
-      letter-spacing: 0.05em;
+      margin-bottom: 38px;
+      letter-spacing: 0.06em;
+      line-height: 1.82;
     }
 
-    /* ── Footer ── */
+    /* ─────── FOOTER ─────── */
     footer {
       width: 100%;
-      max-width: 860px;
+      max-width: 920px;
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: space-between;
       flex-wrap: wrap;
-      gap: 12px;
-      padding-top: 28px;
-      border-top: 1px solid var(--border);
+      gap: 16px;
+      padding-top: 32px;
+      border-top: 1px solid rgba(26,26,50,0.85);
     }
-
+    .footer-left { display: flex; flex-direction: column; gap: 5px; }
     .footer-brand {
-      font-size: 10px;
+      font-size: 9.5px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: rgba(82,98,122,0.38);
+    }
+    .footer-by {
+      font-size: 8.5px;
       letter-spacing: 0.2em;
       text-transform: uppercase;
-      color: rgba(88,104,126,0.45);
+      background: linear-gradient(110deg, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      opacity: 0.65;
     }
-
-    .footer-links {
-      display: flex;
-      gap: 20px;
-    }
-
+    .footer-links { display: flex; gap: 4px; align-items: center; }
     .footer-links a {
-      font-size: 10px;
+      font-size: 9px;
       letter-spacing: 0.14em;
       text-transform: uppercase;
-      color: rgba(88,104,126,0.5);
+      color: rgba(82,98,122,0.45);
       text-decoration: none;
-      transition: color 0.15s;
+      padding: 6px 12px;
+      border-radius: var(--r-sm);
+      border: 1px solid transparent;
+      transition: all 0.16s;
     }
-    .footer-links a:hover { color: var(--muted); }
+    .footer-links a:hover {
+      color: var(--muted);
+      background: rgba(0,200,255,0.04);
+      border-color: rgba(0,200,255,0.12);
+    }
 
-    /* ── Responsive ── */
-    @media (max-width: 600px) {
-      nav { flex-direction: column; gap: 16px; margin-bottom: 56px; }
-      .step:first-child { border-radius: 18px 18px 0 0; }
-      .step:last-child  { border-radius: 0 0 18px 18px; }
+    /* ─────── RESPONSIVE ─────── */
+    @media (max-width: 620px) {
+      nav { flex-direction: column; gap: 18px; margin-bottom: 68px; }
       .steps-grid { grid-template-columns: 1fr; }
-      footer { flex-direction: column; align-items: flex-start; }
+      .platform-row { flex-direction: column; align-items: center; }
+      footer { flex-direction: column; }
+      .hero-title { font-size: clamp(56px, 20vw, 100px); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .orb, .nav-pulse, .badge-dot { animation: none; }
+      .btn, .feature, .step, .plat-card, .pb { transition: none; }
     }
   </style>
 </head>
 <body>
 
-<div class="orbs">
+<!-- Ambient background -->
+<div class="bg-layer">
   <div class="orb orb-1"></div>
   <div class="orb orb-2"></div>
   <div class="orb orb-3"></div>
+  <div class="orb orb-4"></div>
 </div>
+<div class="bg-dots"></div>
 
 <div class="page">
 
-  <!-- Nav -->
+  <!-- ══ NAV ══ -->
   <nav>
-    <span class="nav-brand">The Rift</span>
+    <a class="nav-brand" href="#">
+      <span class="nav-pulse"></span>
+      The Rift
+    </a>
     <div class="nav-links">
       <a href="#features">Features</a>
       <a href="#how">How it works</a>
-      <a href="https://github.com/Ultim8-netizen/The-rift" target="_blank" rel="noopener">GitHub</a>
+      <a href="#platforms">Platforms</a>
+      <a href="https://github.com/Ultim8-netizen/The-rift" target="_blank" rel="noopener" class="nav-gh">GitHub ↗</a>
     </div>
   </nav>
 
-  <!-- Hero -->
+  <!-- ══ HERO ══ -->
   <section class="hero">
-    <div class="hero-badge">v0.1.1 — Now Available</div>
-    <h1 class="hero-title">THE RIFT</h1>
+    <div class="hero-badge">
+      <span class="badge-dot"></span>
+      v1.1.1 — Now Live
+    </div>
+
+    <p class="hero-eyebrow">abyssprotocol</p>
+    <div class="hero-title-wrap">
+      <div class="hero-glow"></div>
+      <h1 class="hero-title">THE RIFT</h1>
+    </div>
+
     <p class="hero-sub">
       Direct device-to-device file transfer.<br>
-      No internet. No cloud. No limits.
+      No internet. No cloud. No accounts. Ever.
     </p>
-    <p class="hero-byline">by abyssprotocol</p>
+    <p class="hero-byline">built by abyssprotocol</p>
+
+    <div class="platform-row">
+      <span class="platform-pill"><span class="platform-pill-icon">⊞</span> Windows x64</span>
+      <span class="platform-pill"><span class="platform-pill-icon">◉</span> Android 7.0+</span>
+      <span class="platform-pill"><span class="platform-pill-icon">◈</span> Tauri · Native</span>
+      <span class="platform-pill"><span class="platform-pill-icon">◑</span> Open Source</span>
+    </div>
 
     <div class="downloads">
-      
-        class="btn btn-primary"
-        href="https://github.com/Ultim8-netizen/The-rift/releases/download/v0.1.1/The.Rift_0.1.1_x64-setup.exe"
-      >
+      <a class="btn btn-win"
+         href="https://github.com/Ultim8-netizen/The-rift/releases/download/v1.1.1/The.Rift_1.1.1_x64-setup.exe">
+        <span>Download for Windows</span>
+        <span class="btn-tag">x64 · .exe · 4.85 MB</span>
+      </a>
+      <a class="btn btn-msi"
+         href="https://github.com/Ultim8-netizen/The-rift/releases/download/v1.1.1/The.Rift_1.1.1_x64_en-US.msi">
+        <span>Windows Installer</span>
+        <span class="btn-tag">.msi · 6.12 MB</span>
+      </a>
+      <a class="btn btn-apk"
+         href="https://github.com/Ultim8-netizen/The-rift/releases/download/v1.1.1/The.Rift_v1.1.1.apk">
+        <span>Download for Android</span>
+        <span class="btn-tag">APK · Sideload · 49.6 MB</span>
+      </a>
+      <a class="btn btn-ghost"
+         href="https://github.com/Ultim8-netizen/The-rift/releases"
+         target="_blank" rel="noopener">
+        All releases &amp; changelog · GitHub ↗
+      </a>
+    </div>
+  </section>
+
+  <!-- Stats strip -->
+  <div class="stats-strip">
+    <div class="stat-pill">
+      <span class="stat-val">4×</span>
+      <span class="stat-sep"></span>
+      <span class="stat-lbl">TCP Streams</span>
+    </div>
+    <div class="stat-pill">
+      <span class="stat-val">BLAKE3</span>
+      <span class="stat-sep"></span>
+      <span class="stat-lbl">Per-chunk Integrity</span>
+    </div>
+    <div class="stat-pill">
+      <span class="stat-val">3-Layer</span>
+      <span class="stat-sep"></span>
+      <span class="stat-lbl">Discovery</span>
+    </div>
+    <div class="stat-pill">
+      <span class="stat-val">~11s</span>
+      <span class="stat-sep"></span>
+      <span class="stat-lbl">Dead-peer Detection</span>
+    </div>
+    <div class="stat-pill">
+      <span class="stat-val">8</span>
+      <span class="stat-sep"></span>
+      <span class="stat-lbl">Themes</span>
+    </div>
+    <div class="stat-pill">
+      <span class="stat-val">Android 7+</span>
+      <span class="stat-sep"></span>
+      <span class="stat-lbl">Native Mobile</span>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- ══ FEATURES ══ -->
+  <div class="s-header" id="features">
+    <span class="s-eyebrow">Capabilities</span>
+    <h2 class="s-title">What makes it different</h2>
+  </div>
+
+  <section class="features">
+
+    <div class="feature">
+      <span class="feature-icon">⚡</span>
+      <p class="feature-title">Multi-Stream Transfer Engine</p>
+      <p class="feature-desc">4 parallel TCP worker streams per file, pipelined dispatch. BLAKE3 integrity verification on every chunk. An independent overseer cross-checks progress against the manifest in real time with live speed and ETA on both ends.</p>
+      <span class="feature-new">New in v1.1.1</span>
+    </div>
+
+    <div class="feature">
+      <span class="feature-icon">⬡</span>
+      <p class="feature-title">Triple-Layer Discovery</p>
+      <p class="feature-desc">mDNS for zero-config local resolution, UDP broadcast for cross-subnet reach, active subnet scan as fallback. Batch discovery events prevent UI frame drops at scan completion. Devices appear within seconds.</p>
+      <span class="feature-new">New in v1.1.1</span>
+    </div>
+
+    <div class="feature">
+      <span class="feature-icon">◉</span>
+      <p class="feature-title">Android Native</p>
+      <p class="feature-desc">Full native mobile layout with three-tab interface — Devices, Send, History. In-app file browser backed by a storage scanner, no system picker required. Three-tier fallback for maximum OEM compatibility. Android 7.0+.</p>
+      <span class="feature-new">New in v1.1.1</span>
+    </div>
+
+    <div class="feature">
+      <span class="feature-icon">⊞</span>
+      <p class="feature-title">Windows Hotspot</p>
+      <p class="feature-desc">Automated hotspot creation via WinRT with netsh fallback for older adapters. Detects an already-running hotspot without duplicating it. Join another device's hotspot directly from inside the app.</p>
+      <span class="feature-new">New in v1.1.1</span>
+    </div>
+
+    <div class="feature">
+      <span class="feature-icon">↻</span>
+      <p class="feature-title">Connection Stability</p>
+      <p class="feature-desc">Persistent TCP rift channel between transfers with bond-keeper pings every second — no radio idle eviction. Heartbeat monitoring with automatic device eviction after sustained failure. ~11-second dead-peer detection.</p>
+      <span class="feature-new">New in v1.1.1</span>
+    </div>
+
+    <div class="feature">
+      <span class="feature-icon">⤵</span>
+      <p class="feature-title">Any File. Any Size.</p>
+      <p class="feature-desc">Raw byte streaming with 4 MB chunked transfer. Videos, archives, ISOs, APKs — no restrictions. Resumable from the last verified chunk if a transfer is interrupted mid-stream.</p>
+    </div>
+
+    <div class="feature">
+      <span class="feature-icon">◈</span>
+      <p class="feature-title">Zero Configuration</p>
+      <p class="feature-desc">Open the app on two devices and they find each other. No IP addresses, no pairing codes, no accounts, no cloud relay, no setup wizard. It simply works.</p>
+    </div>
+
+    <div class="feature">
+      <span class="feature-icon">◑</span>
+      <p class="feature-title">8 Themes</p>
+      <p class="feature-desc">Void, Abyss, Slate, Cosmos, Rose, Citrus, Sky, and Auto — which follows your system preference. Dark and light palettes. Switch instantly, no restart required.</p>
+    </div>
+
+  </section>
+
+  <div class="divider"></div>
+
+  <!-- ══ CHANGELOG ══ -->
+  <div class="s-header">
+    <span class="s-eyebrow">Changelog</span>
+    <h2 class="s-title">What's new in v1.1.1</h2>
+  </div>
+
+  <div class="changelog-grid">
+
+    <div class="cl-card">
+      <p class="cl-title"><span class="cl-dot"></span>Transfer Engine</p>
+      <ul class="cl-list">
+        <li class="cl-item">4 parallel worker streams per file, pipelined dispatch</li>
+        <li class="cl-item">BLAKE3 integrity on every chunk, not just the full file</li>
+        <li class="cl-item">Resumable — picks up from last verified chunk after interruption</li>
+        <li class="cl-item">Independent transfer overseer cross-checks progress against manifest</li>
+        <li class="cl-item">Real-time speed, progress, and ETA on sender and receiver</li>
+      </ul>
+    </div>
+
+    <div class="cl-card">
+      <p class="cl-title"><span class="cl-dot"></span>Discovery &amp; Stability</p>
+      <ul class="cl-list">
+        <li class="cl-item">Triple-layer discovery — mDNS, UDP broadcast, active subnet scan</li>
+        <li class="cl-item">Batch discovery events — no frame drops at scan completion</li>
+        <li class="cl-item">Persistent TCP rift channel kept alive between transfers</li>
+        <li class="cl-item">Bond keeper sends gateway pings every 1 second</li>
+        <li class="cl-item">Heartbeat monitoring with automatic eviction after sustained failure</li>
+        <li class="cl-item">~11-second dead-peer detection via TCP keepalive</li>
+      </ul>
+    </div>
+
+    <div class="cl-card">
+      <p class="cl-title"><span class="cl-dot"></span>Android</p>
+      <ul class="cl-list">
+        <li class="cl-item">Full native layout — three tabs: Devices, Send, History</li>
+        <li class="cl-item">In-app file browser backed by storage scanner</li>
+        <li class="cl-item">Three-tier file picker fallback for OEM compatibility</li>
+        <li class="cl-item">Targets Android 7.0 and above</li>
+      </ul>
+    </div>
+
+    <div class="cl-card">
+      <p class="cl-title"><span class="cl-dot"></span>Everything Else</p>
+      <ul class="cl-list">
+        <li class="cl-item">Automated Windows hotspot via WinRT, netsh fallback</li>
+        <li class="cl-item">Detect existing hotspot — no duplicate creation</li>
+        <li class="cl-item">Text transfer between any two connected devices</li>
+        <li class="cl-item">8 themes including new Auto mode</li>
+        <li class="cl-item">First-launch agreement, animated splash, interactive guided tour</li>
+        <li class="cl-item">Built-in help page and full reference guide</li>
+      </ul>
+    </div>
+
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- ══ HOW IT WORKS ══ -->
+  <div class="s-header" id="how">
+    <span class="s-eyebrow">Process</span>
+    <h2 class="s-title">How it works</h2>
+  </div>
+
+  <div class="steps-grid">
+    <div class="step">
+      <span class="step-num">01</span>
+      <p class="step-text">Install The Rift on both machines. Windows x64 EXE or MSI installer. Android APK via sideload — no Play Store needed. No account, no sign-up.</p>
+    </div>
+    <div class="step">
+      <span class="step-num">02</span>
+      <p class="step-text">Connect both devices to the same WiFi — or use the built-in Windows hotspot tool to create one right from inside the app.</p>
+    </div>
+    <div class="step">
+      <span class="step-num">03</span>
+      <p class="step-text">Open The Rift on both devices. Triple-layer auto-discovery finds them within seconds. No IP addresses, no pairing codes.</p>
+    </div>
+    <div class="step">
+      <span class="step-num">04</span>
+      <p class="step-text">Select a device, drop your files, click Send. The recipient accepts and 4-stream transfer begins immediately. Real-time speed and ETA on both sides.</p>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- ══ THEMES ══ -->
+  <div class="s-header">
+    <span class="s-eyebrow">Appearance</span>
+    <h2 class="s-title">Eight themes</h2>
+  </div>
+
+  <div class="themes-row">
+    <div class="theme-swatch">
+      <div class="swatch-disc" style="background:#08080e; box-shadow:0 0 0 1.5px #2a2a46, 0 0 22px rgba(0,200,255,0.24);">
+        <span class="swatch-dot" style="background:#00c8ff; box-shadow:0 0 7px #00c8ff;"></span>
+      </div>
+      <span class="swatch-label">Void</span>
+    </div>
+    <div class="theme-swatch">
+      <div class="swatch-disc" style="background:#04081e; box-shadow:0 0 0 1.5px #12285c, 0 0 22px rgba(78,138,255,0.24);">
+        <span class="swatch-dot" style="background:#60b6ff; box-shadow:0 0 7px #60b6ff;"></span>
+      </div>
+      <span class="swatch-label">Abyss</span>
+    </div>
+    <div class="theme-swatch">
+      <div class="swatch-disc" style="background:#0b0b0f; box-shadow:0 0 0 1.5px #30303e, 0 0 22px rgba(178,184,210,0.15);">
+        <span class="swatch-dot" style="background:#bcc2d2; box-shadow:0 0 7px #bcc2d2;"></span>
+      </div>
+      <span class="swatch-label">Slate</span>
+    </div>
+    <div class="theme-swatch">
+      <div class="swatch-disc" style="background:#080416; box-shadow:0 0 0 1.5px #341862, 0 0 22px rgba(200,118,255,0.24);">
+        <span class="swatch-dot" style="background:#c06cff; box-shadow:0 0 7px #c06cff;"></span>
+      </div>
+      <span class="swatch-label">Cosmos</span>
+    </div>
+    <div class="theme-swatch">
+      <div class="swatch-disc" style="background:#fff2fa; box-shadow:0 0 0 1.5px #ffc0de, 0 0 22px rgba(208,62,138,0.2);">
+        <span class="swatch-dot" style="background:#d03e8a; box-shadow:0 0 7px #d03e8a;"></span>
+      </div>
+      <span class="swatch-label">Rose</span>
+    </div>
+    <div class="theme-swatch">
+      <div class="swatch-disc" style="background:#ffffe6; box-shadow:0 0 0 1.5px #cec850, 0 0 22px rgba(145,135,0,0.18);">
+        <span class="swatch-dot" style="background:#918700; box-shadow:0 0 7px #a09800;"></span>
+      </div>
+      <span class="swatch-label">Citrus</span>
+    </div>
+    <div class="theme-swatch">
+      <div class="swatch-disc" style="background:#e6f2ff; box-shadow:0 0 0 1.5px #9ccef0, 0 0 22px rgba(18,112,214,0.2);">
+        <span class="swatch-dot" style="background:#1270d6; box-shadow:0 0 7px #1270d6;"></span>
+      </div>
+      <span class="swatch-label">Sky</span>
+    </div>
+    <div class="theme-swatch">
+      <div class="swatch-disc" style="background:linear-gradient(138deg, #090916 50%, #eef2ff 50%); box-shadow:0 0 0 1.5px #28284a, 0 0 22px rgba(100,120,255,0.2);">
+        <span class="swatch-dot" style="background:#7090ff; box-shadow:0 0 7px #7090ff;"></span>
+      </div>
+      <span class="swatch-label">Auto</span>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- ══ PLATFORMS ══ -->
+  <div class="s-header" id="platforms">
+    <span class="s-eyebrow">Availability</span>
+    <h2 class="s-title">Available on</h2>
+  </div>
+
+  <div class="platforms-grid">
+
+    <div class="plat-card pc">
+      <span class="plat-icon">⊞</span>
+      <p class="plat-name">Windows</p>
+      <p class="plat-sub">
+        x64 · Windows 10 and above<br>
+        Native app built with Tauri — not a browser tab.<br>
+        No runtime required after install. Drag files from Explorer.
+      </p>
+      <div class="plat-btns">
+        <a class="pb pb-win-solid"
+           href="https://github.com/Ultim8-netizen/The-rift/releases/download/v1.1.1/The.Rift_1.1.1_x64-setup.exe">
+          .exe Setup
+        </a>
+        <a class="pb pb-win-outline"
+           href="https://github.com/Ultim8-netizen/The-rift/releases/download/v1.1.1/The.Rift_1.1.1_x64_en-US.msi">
+          .msi Installer
+        </a>
+      </div>
+    </div>
+
+    <div class="plat-card droid">
+      <span class="plat-icon">◉</span>
+      <p class="plat-name">Android</p>
+      <p class="plat-sub">
+        Android 7.0 and above<br>
+        Sideload the APK — no Play Store required.<br>
+        Native 3-tab UI with built-in file browser.
+      </p>
+      <div class="plat-btns">
+        <a class="pb pb-droid"
+           href="https://github.com/Ultim8-netizen/The-rift/releases/download/v1.1.1/The.Rift_v1.1.1.apk">
+          Download APK
+        </a>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- ══ CTA ══ -->
+  <section class="cta">
+    <h2 class="cta-title">Ready to open the rift?</h2>
+    <p class="cta-sub">
+      Free. Open source. No account required. No internet needed after download.<br>
+      PC to PC. PC to Android. Clean, fast, private.
+    </p>
+    <div class="downloads">
+      <a class="btn btn-win"
+         href="https://github.com/Ultim8-netizen/The-rift/releases/download/v1.1.1/The.Rift_1.1.1_x64-setup.exe">
         <span>Download for Windows</span>
         <span class="btn-tag">x64 · .exe</span>
       </a>
-      
-      
-        class="btn btn-secondary"
-        href="https://github.com/Ultim8-netizen/The-rift/releases/download/v0.1.1/The.Rift_0.1.1_x64_en-US.msi"
-      >
-        <span>Windows Installer</span>
-        <span class="btn-tag">.msi</span>
+      <a class="btn btn-apk"
+         href="https://github.com/Ultim8-netizen/The-rift/releases/download/v1.1.1/The.Rift_v1.1.1.apk">
+        <span>Download for Android</span>
+        <span class="btn-tag">APK · Sideload</span>
       </a>
-      
-      
-        class="btn btn-ghost"
-        href="https://github.com/Ultim8-netizen/The-rift/releases"
-        target="_blank"
-        rel="noopener"
-      >
+      <a class="btn btn-ghost"
+         href="https://github.com/Ultim8-netizen/The-rift/releases"
+         target="_blank" rel="noopener">
         All releases · GitHub ↗
       </a>
     </div>
   </section>
 
+  <!-- ══ FOOTER ══ -->
   <div class="divider"></div>
-
-  <!-- Features -->
-  <p class="features-title" id="features">What makes it different</p>
-  <section class="features">
-    <div class="feature">
-      <span class="feature-icon">◈</span>
-      <p class="feature-title">Zero Configuration</p>
-      <p class="feature-desc">Open the app on two devices. They find each other automatically via mDNS — no IP addresses, no pairing codes, no accounts.</p>
-    </div>
-    <div class="feature">
-      <span class="feature-icon">⤵</span>
-      <p class="feature-title">Any File. Any Size.</p>
-      <p class="feature-desc">Raw byte streaming with 4MB chunked transfer and SHA-256 integrity verification per chunk. Videos, archives, ISOs — no restrictions.</p>
-    </div>
-    <div class="feature">
-      <span class="feature-icon">⬡</span>
-      <p class="feature-title">Text Transfer</p>
-      <p class="feature-desc">Send raw text between devices instantly. No clipboard sync tool. No third-party service. Just type and send.</p>
-    </div>
-    <div class="feature">
-      <span class="feature-icon">↻</span>
-      <p class="feature-title">Resumable Transfers</p>
-      <p class="feature-desc">Network dropped mid-transfer? Each chunk is independently verified and tracked. Resume from where you left off.</p>
-    </div>
-    <div class="feature">
-      <span class="feature-icon">◑</span>
-      <p class="feature-title">Multiple Themes</p>
-      <p class="feature-desc">Seven themes across dark and light palettes. Void, Abyss, Slate, Cosmos, Rose, Citrus, Sky. Switch instantly.</p>
-    </div>
-    <div class="feature">
-      <span class="feature-icon">⊞</span>
-      <p class="feature-title">Native Desktop App</p>
-      <p class="feature-desc">Built with Tauri. A real native window — not a browser tab. Drag files straight from Explorer. No runtime required after install.</p>
-    </div>
-  </section>
-
-  <div class="divider"></div>
-
-  <!-- How it works -->
-  <div class="steps" id="how">
-    <p class="steps-title">How it works</p>
-    <div class="steps-grid">
-      <div class="step">
-        <span class="step-num">01</span>
-        <p class="step-label">Download and install The Rift on both machines. Runs on Windows, macOS, Linux.</p>
-      </div>
-      <div class="step">
-        <span class="step-num">02</span>
-        <p class="step-label">Connect both devices to the same WiFi network — or create a hotspot from one to the other.</p>
-      </div>
-      <div class="step">
-        <span class="step-num">03</span>
-        <p class="step-label">Open The Rift. Both devices appear automatically in the left panel within seconds.</p>
-      </div>
-      <div class="step">
-        <span class="step-num">04</span>
-        <p class="step-label">Select a device, drop your files, click Send. Files land in Downloads on the other side.</p>
-      </div>
-    </div>
-  </div>
-
-  <div class="divider"></div>
-
-  <!-- Themes -->
-  <div class="themes-section">
-    <p class="themes-title">Themes</p>
-    <div class="themes-grid">
-      <div class="theme-swatch">
-        <div class="swatch-disc" style="background:#08080e; box-shadow: 0 0 0 1px #26263c, 0 0 14px rgba(0,200,255,0.2);">
-          <span class="swatch-dot" style="background:#00c8ff;"></span>
-        </div>
-        <span class="swatch-label">Void</span>
-      </div>
-      <div class="theme-swatch">
-        <div class="swatch-disc" style="background:#04081e; box-shadow: 0 0 0 1px #12285c, 0 0 14px rgba(78,138,255,0.2);">
-          <span class="swatch-dot" style="background:#60b6ff;"></span>
-        </div>
-        <span class="swatch-label">Abyss</span>
-      </div>
-      <div class="theme-swatch">
-        <div class="swatch-disc" style="background:#0b0b0e; box-shadow: 0 0 0 1px #323240, 0 0 14px rgba(178,184,210,0.15);">
-          <span class="swatch-dot" style="background:#bcc2d2;"></span>
-        </div>
-        <span class="swatch-label">Slate</span>
-      </div>
-      <div class="theme-swatch">
-        <div class="swatch-disc" style="background:#080416; box-shadow: 0 0 0 1px #341862, 0 0 14px rgba(200,118,255,0.2);">
-          <span class="swatch-dot" style="background:#c06cff;"></span>
-        </div>
-        <span class="swatch-label">Cosmos</span>
-      </div>
-      <div class="theme-swatch">
-        <div class="swatch-disc" style="background:#fff2fa; box-shadow: 0 0 0 1px #ffc0de, 0 0 14px rgba(208,62,138,0.18);">
-          <span class="swatch-dot" style="background:#d03e8a;"></span>
-        </div>
-        <span class="swatch-label">Rose</span>
-      </div>
-      <div class="theme-swatch">
-        <div class="swatch-disc" style="background:#ffffe6; box-shadow: 0 0 0 1px #d0d058, 0 0 14px rgba(145,135,0,0.18);">
-          <span class="swatch-dot" style="background:#918700;"></span>
-        </div>
-        <span class="swatch-label">Citrus</span>
-      </div>
-      <div class="theme-swatch">
-        <div class="swatch-disc" style="background:#e6f2ff; box-shadow: 0 0 0 1px #acd0f4, 0 0 14px rgba(18,112,214,0.18);">
-          <span class="swatch-dot" style="background:#1270d6;"></span>
-        </div>
-        <span class="swatch-label">Sky</span>
-      </div>
-    </div>
-  </div>
-
-  <div class="divider"></div>
-
-  <!-- CTA -->
-  <section class="cta">
-    <h2 class="cta-title">Ready to open the rift?</h2>
-    <p class="cta-sub">Free. Open source. No account. No internet required after download.</p>
-    <div class="downloads">
-      
-        class="btn btn-primary"
-        href="https://github.com/Ultim8-netizen/The-rift/releases/download/v0.1.1/The.Rift_0.1.1_x64-setup.exe"
-      >
-        <span>Download for Windows</span>
-        <span class="btn-tag">x64 · .exe</span>
-      </a>
-    </div>
-  </section>
-
-  <!-- Footer -->
   <footer>
-    <span class="footer-brand">abyssprotocol / the rift / v0.1.1</span>
+    <div class="footer-left">
+      <span class="footer-brand">the rift · v1.1.1 · open source</span>
+      <span class="footer-by">by abyssprotocol</span>
+    </div>
     <div class="footer-links">
       <a href="https://github.com/Ultim8-netizen/The-rift" target="_blank" rel="noopener">Source</a>
       <a href="https://github.com/Ultim8-netizen/The-rift/releases" target="_blank" rel="noopener">Releases</a>
