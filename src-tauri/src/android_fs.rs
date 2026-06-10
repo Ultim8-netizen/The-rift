@@ -60,6 +60,14 @@
 //! or READ_MEDIA_* (API 33+) is granted. On API 33+ without those permissions,
 //! OpenMultipleDocuments covers the gap (no permission required).
 //!
+//! ── File name preservation ─────────────────────────────────────────────────
+//! RiftFilePicker.copyUriToCache() names cache files:
+//!   rift_send_{timestamp_ms}_{original_display_name}
+//!   rift_t1_{timestamp_ms}_{file_index}_{original_display_name}   (Tier 1)
+//!
+//! resolve_single() strips these prefixes before the name enters the transfer
+//! manifest so the receiver saves files with their original display names.
+//!
 //! ── Developer diagnostics ──────────────────────────────────────────────────
 //! All tier transitions emit eprintln! visible in logcat tag RustStdoutStderr.
 //! Filter: `adb logcat -s RustStdoutStderr`
@@ -119,7 +127,7 @@ static PICK_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// Oneshot result channel — sender registered by trigger_android_picker_tier2(),
 /// consumed by nativeOnFilesSelected() when Kotlin delivers results.
 #[cfg(target_os = "android")]
-static PICK_SENDER: OnceLock<  // FIX: was `OnceLock` — missing `<`
+static PICK_SENDER: OnceLock<                                          // FIX 1: was `OnceLock` (missing `<`)
     std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Vec<PickedFile>>>>,
 > = OnceLock::new();
 
@@ -134,7 +142,7 @@ static PICK_SENDER: OnceLock<  // FIX: was `OnceLock` — missing `<`
 /// Stores the JavaVM pointer. Called on the main thread during init.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_nativeInitJvm<  // FIX: missing `<`
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_nativeInitJvm<  // FIX 2: was missing `<`
     'local,
 >(
     mut env: jni::JNIEnv<'local>,
@@ -155,7 +163,7 @@ pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftAndroidHelper_native
 /// RiftFilePicker.register() so the app class loader is active.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeRegisterPickerClass<  // FIX: missing `<`
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeRegisterPickerClass<  // FIX 3: was missing `<`
     'local,
 >(
     mut env: jni::JNIEnv<'local>,
@@ -181,7 +189,7 @@ pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeReg
 /// No Tauri exception state. No ExceptionCheck risk. Always safe.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeGetPickRequest<  // FIX: missing `<`
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeGetPickRequest<  // FIX 4: was missing `<`
     'local,
 >(
     _env: jni::JNIEnv<'local>,
@@ -201,7 +209,7 @@ pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeGet
 /// DIRECTION: Kotlin->Rust. Runs on the worker thread spawned in onPickerResult.
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeOnFilesSelected<  // FIX: missing `<`
+pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeOnFilesSelected<  // FIX 5: was missing `<`
     'local,
 >(
     mut env: jni::JNIEnv<'local>,
@@ -260,12 +268,10 @@ pub unsafe extern "C" fn Java_com_abyssprotocol_therift_RiftFilePicker_nativeOnF
 /// reliable file selection path that requires no system picker and no content://
 /// URI machinery.
 ///
-/// Directory set is designed for broad coverage across:
-///   • AOSP standard directories (Download, DCIM, Pictures, Documents, etc.)
-///   • OEM path aliases (TECNO/Infinix/Itel sdcard symlinks)
-///   • WhatsApp media directories (primary file-sharing channel in West Africa:
-///     Nigeria, Ghana, Kenya, South Africa; both legacy and API-29+ sandboxed paths)
-///   • Telegram cache directories
+/// Directory scanning uses a breadth-first approach with MAX_DEPTH = 1, which
+/// means each base directory and its immediate subdirectories are scanned. This
+/// covers DCIM/Camera, Download/subfolders, etc. without traversing the full
+/// file system.
 ///
 /// Returns up to MAX_SCAN_FILES entries to avoid OOM on low-RAM devices (the
 /// typical 2–3 GB RAM range of TECNO Camon, Infinix Hot, Itel P-series targets).
@@ -555,19 +561,26 @@ async fn trigger_android_picker_tier2() -> anyhow::Result<Vec<PickedFile>> {
 /// (diagnostic in trigger_android_picker) and scan_android_dirs() (frontend
 /// in-app browser backend via the scan_android_files Tauri command).
 ///
+/// Uses a breadth-first traversal with MAX_DEPTH = 1 so that immediate
+/// subdirectories are also scanned (e.g. DCIM/Camera, Download/subfolder).
+/// Hidden directories (starting with '.') and the protected Android/data
+/// directory are not enqueued.
+///
 /// Directory set covers:
-///   • AOSP standard public dirs
+///   • AOSP standard public dirs + common OEM aliases
 ///   • TECNO/Infinix/Itel sdcard symlinks (Transsion OEM path aliases)
 ///   • WhatsApp media (legacy + API-29 sandboxed Android/media path)
 ///   • Telegram
 ///   • Samsung/OEM Received folder
 ///
 /// Capped at MAX_SCAN_FILES (2000) to protect low-RAM devices (2–3 GB, typical
-/// for West African market targets). Files are returned in directory discovery
-/// order; the frontend can sort by name, date, or size.
+/// for West African market targets). Files are returned in BFS discovery order;
+/// the frontend can sort by name, date, or size.
 #[cfg(target_os = "android")]
 async fn list_accessible_files() -> anyhow::Result<Vec<PickedFile>> {
     const MAX_SCAN_FILES: usize = 2000;
+    /// Scan base directories + their immediate subdirectories.
+    const MAX_DEPTH: usize = 1;
 
     let candidate_dirs: &[&str] = &[
         // ── AOSP standard public directories ─────────────────────────────────
@@ -579,8 +592,15 @@ async fn list_accessible_files() -> anyhow::Result<Vec<PickedFile>> {
         "/storage/emulated/0/Music",
         "/storage/emulated/0/Movies",
         "/storage/emulated/0/Video",
+        "/storage/emulated/0/Videos",
         "/storage/emulated/0/Bluetooth",
         "/storage/emulated/0/Received",
+        "/storage/emulated/0/Files",
+        "/storage/emulated/0/Recordings",
+        "/storage/emulated/0/Ringtones",
+        "/storage/emulated/0/Podcasts",
+        "/storage/emulated/0/Audiobooks",
+        "/storage/emulated/0/Screenshots",
         // ── OEM path aliases (Transsion/TECNO, Infinix, Itel, Samsung) ───────
         // These are typically symlinks to /storage/emulated/0/ but some OEM
         // builds use them as actual distinct paths.
@@ -588,6 +608,13 @@ async fn list_accessible_files() -> anyhow::Result<Vec<PickedFile>> {
         "/sdcard/DCIM",
         "/sdcard/Pictures",
         "/sdcard/Documents",
+        "/sdcard/Movies",
+        "/sdcard/Music",
+        "/sdcard/Videos",
+        "/sdcard/Files",
+        // ── TECNO/Infinix specific ────────────────────────────────────────────
+        // TECNO stock file manager creates a "MyFiles" root; Infinix similarly.
+        "/storage/emulated/0/MyFiles",
         // ── WhatsApp media paths ─────────────────────────────────────────────
         // Primary file-sharing channel in Nigeria, Ghana, Kenya, South Africa.
         // Legacy path (Android ≤9, or older WhatsApp installations):
@@ -605,16 +632,23 @@ async fn list_accessible_files() -> anyhow::Result<Vec<PickedFile>> {
         "/storage/emulated/0/Android/media/org.telegram.messenger/Telegram/Telegram Documents",
     ];
 
-    let mut found = Vec::new();
+    let mut found: Vec<PickedFile> = Vec::new();
 
-    'dir_loop: for dir in candidate_dirs {
-        let path = std::path::Path::new(dir);
+    // BFS queue: (directory_path, current_depth).
+    // All candidate roots start at depth 0.
+    let mut queue: std::collections::VecDeque<(String, usize)> = candidate_dirs
+        .iter()
+        .map(|d| (d.to_string(), 0_usize))
+        .collect();
+
+    'scan: while let Some((dir_str, depth)) = queue.pop_front() {
+        let path = std::path::Path::new(&dir_str);
         if !path.exists() {
             continue;
         }
         match tokio::fs::read_dir(path).await {
             Err(e) => {
-                eprintln!("[FilePicker/T3] Cannot read {dir}: {e}");
+                eprintln!("[FilePicker/T3] Cannot read {dir_str}: {e}");
             }
             Ok(mut entries) => {
                 while let Ok(Some(entry)) = entries.next_entry().await {
@@ -622,26 +656,38 @@ async fn list_accessible_files() -> anyhow::Result<Vec<PickedFile>> {
                         eprintln!(
                             "[FilePicker/T3] Scan cap ({MAX_SCAN_FILES} files) reached — stopping"
                         );
-                        break 'dir_loop;
+                        break 'scan;
                     }
                     let fpath = entry.path();
-                    if !fpath.is_file() {
-                        continue;
+                    if fpath.is_file() {
+                        let name = fpath
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let size = tokio::fs::metadata(&fpath)
+                            .await
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                        found.push(PickedFile {
+                            name,
+                            path: fpath.to_string_lossy().to_string(),
+                            size,
+                        });
+                    } else if depth < MAX_DEPTH {
+                        // Enqueue subdirectory for the next BFS pass.
+                        // Skip hidden dirs (.) and Android/data (permission-protected).
+                        let dir_name = fpath
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("");
+                        if !dir_name.starts_with('.') && dir_name != "data" {
+                            queue.push_back((
+                                fpath.to_string_lossy().to_string(),
+                                depth + 1,
+                            ));
+                        }
                     }
-                    let name = fpath
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let size = tokio::fs::metadata(&fpath)
-                        .await
-                        .map(|m| m.len())
-                        .unwrap_or(0);
-                    found.push(PickedFile {
-                        name,
-                        path: fpath.to_string_lossy().to_string(),
-                        size,
-                    });
                 }
             }
         }
@@ -672,16 +718,64 @@ pub async fn resolve_paths(paths: &[String]) -> anyhow::Result<Vec<ResolvedFile>
     Ok(out)
 }
 
+/// Strips the `rift_send_` or `rift_t1_` cache prefix that
+/// RiftFilePicker.copyUriToCache() prepends to the original display name.
+///
+/// Without this, `resolve_single` would derive the transfer name from the
+/// cache path, causing the receiver to save files as `rift_send_1720000000_report.pdf`
+/// instead of `report.pdf`.
+///
+/// Patterns recognised:
+///   `rift_send_{digits}_{original_name}`          → `{original_name}`
+///   `rift_t1_{digits}_{file_index}_{orig_name}`   → `{orig_name}`
+///
+/// If neither pattern matches (e.g. a real file on desktop that happens to
+/// start with those characters), the filename is returned unchanged.
+fn strip_rift_cache_prefix(filename: &str) -> String {
+    // ── rift_send_{digits}_{name} ─────────────────────────────────────────────
+    if let Some(rest) = filename.strip_prefix("rift_send_") {
+        // Trim all leading ASCII digits (timestamp_ms, variable length).
+        let after_ts = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+        if let Some(name) = after_ts.strip_prefix('_') {
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+    // ── rift_t1_{digits}_{index}_{name} ──────────────────────────────────────
+    if let Some(rest) = filename.strip_prefix("rift_t1_") {
+        let after_ts = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+        if let Some(after_first_us) = after_ts.strip_prefix('_') {
+            // Skip the file index digits and the following underscore.
+            let after_idx = after_first_us.trim_start_matches(|c: char| c.is_ascii_digit());
+            if let Some(name) = after_idx.strip_prefix('_') {
+                if !name.is_empty() {
+                    return name.to_string();
+                }
+            }
+        }
+    }
+    filename.to_string()
+}
+
 async fn resolve_single(path: &str) -> anyhow::Result<ResolvedFile> {
     let size = tokio::fs::metadata(path)
         .await
         .map(|m| m.len())
         .unwrap_or(0);
-    let name = std::path::Path::new(path)
+    let raw_name = std::path::Path::new(path)
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("file")
-        .to_string();
+        .unwrap_or("file");
+
+    // On Android, files staged through the system picker are copied to the app
+    // cache with a rift_send_ / rift_t1_ timestamp prefix.  Strip it so the
+    // receiver sees the original display name, not the cache artifact name.
+    #[cfg(target_os = "android")]
+    let name = strip_rift_cache_prefix(raw_name);
+    #[cfg(not(target_os = "android"))]
+    let name = raw_name.to_string();
+
     Ok(ResolvedFile {
         name,
         real_path: path.to_string(),

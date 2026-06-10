@@ -21,6 +21,12 @@ export function MobileSendPanel() {
   const [stageError,   setStageError]   = useState<string | null>(null);
   const [sendError,    setSendError]    = useState<string | null>(null);
 
+  // isPicking: true while the system picker (pick_files_for_send) is in flight.
+  // Covers the gap between the picker closing and the Tauri command resolving
+  // so the UI shows a spinner instead of the empty browse button (eliminates
+  // the brief flash back to the "Tap to browse" state after file selection).
+  const [isPicking, setIsPicking] = useState(false);
+
   // In-app file browser (Android primary path)
   const [browserState,  setBrowserState]  = useState<BrowserState>("closed");
   const [scannedFiles,  setScannedFiles]  = useState<StagedFile[]>([]);
@@ -40,7 +46,6 @@ export function MobileSendPanel() {
   const canSendFiles = stagedFiles.length > 0 && !!selectedDevice && !isSending;
   const canSendText  = text.trim().length > 0 && !!selectedDevice && textStatus !== "sending";
 
-  // Desktop drag-and-drop helper — Android never reaches this.
   const stageFromPaths = useCallback(async (rawPaths: string[]) => {
     if (!rawPaths.length) return;
     const filePaths = await expandToPaths(rawPaths);
@@ -49,32 +54,29 @@ export function MobileSendPanel() {
     setStagedFiles(files);
   }, [call, setStagedFiles]);
 
-  // System picker fallback.
-  // Tier 1 (android-fs plugin) → Tier 2 (OpenMultipleDocuments via RiftPickPoller daemon)
-  // → Tier 3 (diagnostic scan).  Called when scan is empty or by explicit user request.
+  // ── System picker fallback ────────────────────────────────────────────────
+  // Called when the in-app scanner returns empty, or directly on non-Android.
+  // Sets isPicking = true BEFORE awaiting so the spinner appears immediately
+  // when the app returns to foreground after the system picker closes.
   async function fallbackToSystemPicker() {
     setBrowserState("closed");
+    setIsPicking(true);
     try {
       const files = await call<StagedFile[]>("pick_files_for_send");
-      setStagedFiles(files);
+      if (files && files.length > 0) {
+        setStagedFiles(files);
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setStageError(msg);
+    } finally {
+      setIsPicking(false);
     }
   }
 
-  // Primary browse handler.
-  //
-  // Android primary path: scan_android_files reads known directories via
-  // tokio::fs (zero JNI, zero content:// URIs, zero OEM picker variation).
-  // Returns up to 2000 StagedFile entries with real absolute paths — Rust's
-  // send_files command opens them directly with std::fs::File::open.
-  //
-  // If the scan returns empty (permissions not yet granted, non-standard
-  // storage layout) or throws (extremely unlikely), falls through silently
-  // to the system picker cascade.
-  //
-  // Desktop path: tauri-plugin-dialog — completely unchanged.
+  // ── Primary browse handler ────────────────────────────────────────────────
+  // Android: scan_android_files → in-app browser → fallback to system picker.
+  // Desktop: tauri-plugin-dialog (unchanged).
   async function browse() {
     setStageError(null);
     setSendError(null);
@@ -90,10 +92,8 @@ export function MobileSendPanel() {
           setBrowserState("open");
           return;
         }
-        // Scan empty → fall through to system picker.
         setBrowserState("closed");
       } catch {
-        // scan_android_dirs is pure tokio::fs so this is unusual; fall through.
         setBrowserState("closed");
       }
 
@@ -101,7 +101,7 @@ export function MobileSendPanel() {
       return;
     }
 
-    // Desktop: tauri-plugin-dialog — unchanged from original.
+    // Desktop: tauri-plugin-dialog — unchanged.
     try {
       const res = await open({ multiple: true, directory: false });
       if (!res) return;
@@ -112,9 +112,6 @@ export function MobileSendPanel() {
     }
   }
 
-  // Stages the files the user selected in the browser and closes it.
-  // Scanned files already carry real absolute paths plus populated name/size
-  // metadata from Rust — no get_file_metadata round-trip needed.
   function confirmBrowserSelection() {
     const selected = scannedFiles.filter((f) => selectedPaths.has(f.path));
     if (selected.length > 0) setStagedFiles(selected);
@@ -148,8 +145,6 @@ export function MobileSendPanel() {
   const displayedError = stageError ?? sendError;
 
   return (
-    // Outer shell: non-scrolling, position:relative so FileBrowser
-    // (position:absolute, inset:0) covers exactly this panel's visible area.
     <div style={{ width: "100vw", height: "100%", position: "relative", overflow: "hidden" }}>
 
       {/* ── Scrollable panel content ────────────────────────────────────────── */}
@@ -280,7 +275,42 @@ export function MobileSendPanel() {
           {/* ── FILES mode ── */}
           {!textMode && (
             <>
-              {stagedFiles.length === 0 ? (
+              {/* isPicking: system picker returned, waiting for cache copy + JNI result */}
+              {isPicking ? (
+                <div
+                  className="w-full py-12 rounded-3xl flex flex-col items-center gap-4"
+                  style={{
+                    background:     "rgb(var(--rift-surface2) / 0.28)",
+                    boxShadow:      "inset 0 2px 10px rgb(0 0 0 / 0.16)",
+                    backdropFilter: "blur(16px)",
+                  }}
+                >
+                  <div
+                    className="animate-spin"
+                    style={{
+                      width:        38,
+                      height:       38,
+                      borderRadius: "50%",
+                      border:       "2px solid rgb(var(--rift-accent) / 0.14)",
+                      borderTop:    "2px solid rgb(var(--rift-accent))",
+                    }}
+                  />
+                  <div className="text-center px-4">
+                    <p
+                      className="text-sm font-mono font-semibold"
+                      style={{ color: "rgb(var(--rift-muted) / 0.65)" }}
+                    >
+                      Copying selected files…
+                    </p>
+                    <p
+                      className="text-[10px] font-mono mt-1"
+                      style={{ color: "rgb(var(--rift-muted) / 0.35)" }}
+                    >
+                      Large files may take a moment
+                    </p>
+                  </div>
+                </div>
+              ) : stagedFiles.length === 0 ? (
                 <button
                   onClick={browse}
                   className="w-full py-12 rounded-3xl flex flex-col items-center gap-3 active:scale-[0.98] transition-transform duration-150"
@@ -496,15 +526,6 @@ type FileBrowserProps = {
 };
 
 // ── FileBrowser ───────────────────────────────────────────────────────────────
-//
-// Full-panel overlay (position:absolute, inset:0) that provides:
-//   "scanning" state — spinner while scan_android_files runs
-//   "open"     state — searchable list grouped by parent directory,
-//                      multi-select, All/None toggle, Confirm + fallback actions
-//
-// Files returned by the scan are plain absolute filesystem paths accessible
-// directly to Rust's transfer layer. No content:// URIs, no OEM picker,
-// no permission edge-cases beyond the initial storage permission grant.
 
 function FileBrowser({
   state,
@@ -519,10 +540,6 @@ function FileBrowser({
   onFallback,
   onClose,
 }: FileBrowserProps) {
-  // Group visible (filtered) files by parent directory's last path segment.
-  // /storage/emulated/0/Download/report.pdf                                   → "Download"
-  // /storage/emulated/0/Android/media/com.whatsapp/WhatsApp/Media/WhatsApp Documents/d.pdf
-  //                                                                            → "WhatsApp Documents"
   const groups = useMemo<FileGroup[]>(() => {
     const q        = searchQuery.trim().toLowerCase();
     const filtered = q ? files.filter((f) => f.name.toLowerCase().includes(q)) : files;
@@ -568,7 +585,6 @@ function FileBrowser({
         backdropFilter: "blur(24px)",
         boxShadow:      "0 2px 20px rgb(0 0 0 / 0.22)",
       }}>
-        {/* Title + close button */}
         <div style={{
           display:        "flex",
           alignItems:     "center",
@@ -620,7 +636,6 @@ function FileBrowser({
           </button>
         </div>
 
-        {/* Search bar — only in open state */}
         {state === "open" && (
           <div style={{
             display:      "flex",
@@ -674,7 +689,6 @@ function FileBrowser({
           justifyContent: "center",
           gap:            18,
         }}>
-          {/* animate-spin is standard Tailwind — @keyframes spin is always compiled */}
           <div
             className="animate-spin"
             style={{
@@ -746,8 +760,6 @@ function FileBrowser({
         <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
           {groups.map(({ dir, files: groupFiles }) => (
             <div key={dir}>
-
-              {/* Directory heading */}
               <p style={{
                 padding:       "10px 16px 3px",
                 fontFamily:    "'JetBrains Mono', monospace",
@@ -760,7 +772,6 @@ function FileBrowser({
                 {dir}
               </p>
 
-              {/* File rows */}
               {groupFiles.map((f) => {
                 const sel = selectedPaths.has(f.path);
                 return (
@@ -777,7 +788,6 @@ function FileBrowser({
                       transition: "background 0.1s",
                     }}
                   >
-                    {/* Selection circle */}
                     <div style={{
                       width:          18,
                       height:         18,
@@ -805,7 +815,6 @@ function FileBrowser({
                       )}
                     </div>
 
-                    {/* File name */}
                     <p style={{
                       flex:         1,
                       minWidth:     0,
@@ -821,7 +830,6 @@ function FileBrowser({
                       {f.name}
                     </p>
 
-                    {/* File size */}
                     <p style={{
                       fontFamily:    "'JetBrains Mono', monospace",
                       fontSize:      9,
@@ -837,8 +845,6 @@ function FileBrowser({
               })}
             </div>
           ))}
-
-          {/* Bottom pad keeps last rows clear of the sticky footer */}
           <div style={{ height: 130 }} />
         </div>
       )}
@@ -852,8 +858,6 @@ function FileBrowser({
           backdropFilter: "blur(24px)",
           boxShadow:      "0 -2px 20px rgb(0 0 0 / 0.2)",
         }}>
-
-          {/* Selection summary */}
           {selectedCount > 0 && (
             <p style={{
               fontFamily:    "'JetBrains Mono', monospace",
@@ -867,10 +871,7 @@ function FileBrowser({
             </p>
           )}
 
-          {/* Action row */}
           <div style={{ display: "flex", gap: 10 }}>
-
-            {/* All / None toggle */}
             <button
               onClick={allVisibleSelected ? onDeselectAll : onSelectAll}
               style={{
@@ -897,7 +898,6 @@ function FileBrowser({
               {allVisibleSelected ? "None" : "All"}
             </button>
 
-            {/* Confirm selection */}
             <button
               onClick={selectedCount > 0 ? onConfirm : undefined}
               disabled={selectedCount === 0}
@@ -929,7 +929,6 @@ function FileBrowser({
             </button>
           </div>
 
-          {/* Explicit fallback to system picker for edge cases */}
           <button
             onClick={() => { void onFallback(); }}
             style={{

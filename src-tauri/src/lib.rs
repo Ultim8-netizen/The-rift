@@ -26,12 +26,6 @@ async fn get_app_state(state: State<'_, SharedState>) -> Result<AppStatePayload,
     })
 }
 
-/// Android: launches the three-tier file picker, returns staged files.
-///   Tier 1: tauri-plugin-android-fs (if compiled with --features android-fs)
-///   Tier 2: AtomicBool poll-trigger -> RiftPickPoller Kotlin daemon -> OpenMultipleDocuments
-///   Tier 3: accessible directory scan (diagnostic + in-app browser signal)
-///
-/// Desktop: returns "USE_DIALOG_PLUGIN" sentinel; frontend falls back to tauri-plugin-dialog.
 #[tauri::command]
 async fn pick_files_for_send(app: tauri::AppHandle) -> Result<Vec<StagedFile>, String> {
     #[cfg(target_os = "android")]
@@ -62,26 +56,6 @@ async fn pick_files_for_send(app: tauri::AppHandle) -> Result<Vec<StagedFile>, S
     }
 }
 
-/// Scans known Android public directories and returns all readable files.
-///
-/// Used by the frontend to populate an in-app file browser — the primary file
-/// selection path for devices where storage is directly accessible via absolute
-/// paths. The browser lets the user select files; selected paths are passed
-/// directly to send_files, bypassing all content:// URI machinery and OEM picker
-/// variations.
-///
-/// Returns up to 2000 entries (capped in scan_android_dirs to protect low-RAM
-/// devices). The frontend should sort by modification date and allow filtering
-/// by type or name.
-///
-/// Coverage per API level:
-///   API ≤ 32: READ_EXTERNAL_STORAGE → full /storage/emulated/0/ access
-///   API 33+:  READ_MEDIA_IMAGES/VIDEO/AUDIO → respective media directories;
-///             Downloads accessible without permission for third-party files
-///             only via OpenMultipleDocuments — scan returns whatever is readable
-///
-/// Desktop: returns "USE_DIALOG_PLUGIN" error; frontend should not call this on
-/// non-Android platforms.
 #[tauri::command]
 async fn scan_android_files() -> Result<Vec<StagedFile>, String> {
     #[cfg(target_os = "android")]
@@ -176,7 +150,15 @@ async fn rescan(
         }
     });
 
-    #[cfg(not(target_os = "android"))]
+    // Subnet scan: enabled on ALL platforms including Android.
+    //
+    // On Android, subnet scan is critical for AP host mode: when mobile is the
+    // hotspot AP, mDNS multicast and UDP broadcast may not reliably reach PC
+    // clients. TCP connections to port 7474 (/hello endpoint) work correctly
+    // once RiftService.kt releases the process network binding on WiFi loss.
+    //
+    // The scan uses HTTP GET (TCP) not ICMP — no root required on Android.
+    // Timeout: 700ms per host, 40 concurrent. Full /24 scan: ~4.9 seconds.
     {
         let s2 = state.inner().clone();
         let a2 = app.clone();
@@ -429,7 +411,7 @@ async fn decline_transfer(
             .unwrap_or_else(|| pending.sender_device.ip.clone());
 
         (ip, pending.sender_device.port)
-    }; // FIX: was `);` — block expression closes with `}`, not `)`
+    };
 
     let url = format!("http://{}:{}/decline/{}", sender_ip, sender_port, transfer_id);
 
@@ -643,11 +625,22 @@ pub fn run() {
                     });
                 }
 
-                #[cfg(not(target_os = "android"))]
+                // Subnet scan: enabled on ALL platforms including Android.
+                //
+                // Desktop: 2 s delay (fast LAN links).
+                // Android: 5 s delay — lets mDNS, UDP broadcast, and RiftService
+                //   WiFi binding settle before adding scan traffic. This is critical
+                //   for AP host mode where mDNS/broadcast may not reach PC clients
+                //   on the AP subnet (192.168.43.x) without directed broadcasts.
+                //   TCP connect to port 7474 works once the process binding is
+                //   released in RiftService.kt (bindProcessToNetwork → null on loss).
                 {
                     let s = state_clone.clone();
                     let a = app_handle.clone();
                     tauri::async_runtime::spawn(async move {
+                        #[cfg(target_os = "android")]
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        #[cfg(not(target_os = "android"))]
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         network::run_subnet_scan(our_ip, s, a).await;
                     });

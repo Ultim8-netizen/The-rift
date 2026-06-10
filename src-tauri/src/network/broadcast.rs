@@ -7,9 +7,21 @@
 //!   • ANNOUNCE_INTERVAL_SLOW (8 s) — once peers exist: maintenance mode,
 //!     reduces radio duty cycle during active transfers.
 //!
-//! Every instance also listens and upserts any peer it hears, then tries to open
-//! a rift channel with it. The sender fires once immediately on startup so
-//! already-running peers on the subnet hear us without waiting for the first interval.
+//! ── Android AP host mode — directed subnet broadcast ─────────────────────────
+//!
+//! When mobile is the hotspot AP host, `255.255.255.255` (limited broadcast) is
+//! sent on the default route interface, which is typically cellular (rmnet0/ccmni0)
+//! because the OS default route points to the cellular gateway. PC clients on the
+//! AP subnet (192.168.43.x) never receive this packet.
+//!
+//! Fix: on Android, additionally send to the directed subnet broadcast derived
+//! from the device's primary local IP. When mobile is the AP host, `local_ip()`
+//! returns `192.168.43.1`, so we also send to `192.168.43.255:7476`. The AP
+//! routing table has `192.168.43.0/24 → ap0` as a direct route, so this packet
+//! is delivered through the AP interface regardless of the default route.
+//!
+//! Combined with the `bindProcessToNetwork(null)` fix in RiftService.kt and the
+//! subnet scan enabled in lib.rs, this makes discovery bidirectional in AP host mode.
 
 use super::rift_channel;
 use crate::state::{Device, SharedState};
@@ -46,6 +58,21 @@ fn parse_packet(buf: &[u8]) -> Option<(String, String, u16, String)> {
     Some((id, name, port, os))
 }
 
+/// Computes the /24 directed broadcast address from a local IPv4 address.
+///
+/// Android hotspot always assigns /24 subnets (192.168.43.0/24, 192.168.49.0/24,
+/// etc.). A /24 directed broadcast is x.x.x.255.
+///
+/// Returns None for loopback or link-local addresses.
+#[cfg(target_os = "android")]
+fn subnet_broadcast_v4(ip: std::net::Ipv4Addr) -> Option<String> {
+    if ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() {
+        return None;
+    }
+    let o = ip.octets();
+    Some(format!("{}.{}.{}.255:{BROADCAST_PORT}", o[0], o[1], o[2]))
+}
+
 pub async fn start_broadcast_discovery(
     state: SharedState,
     app: AppHandle,
@@ -75,14 +102,53 @@ pub async fn start_broadcast_discovery(
         let sock    = socket.clone();
         let pkt     = packet.clone();
         let dest_c  = dest;
-        let state_c = state.clone(); // cloned separately — receiver takes the original
+        let state_c = state.clone();
         tokio::spawn(async move {
             loop {
+                // ── Primary: limited broadcast (all platforms) ────────────────
+                // Reaches peers when sockets are bound to the correct interface.
                 let _ = sock.send_to(&pkt, dest_c).await;
 
+                // ── Android: directed subnet broadcast (AP host mode fix) ──────
+                //
+                // 255.255.255.255 follows the default route, which is typically
+                // cellular when mobile is the hotspot AP host. The directed
+                // subnet broadcast (192.168.43.255) uses the AP routing table
+                // entry (192.168.43.0/24 → ap0) and reaches PC clients directly.
+                //
+                // This runs on every announce tick so the PC hears the mobile
+                // continuously, not just on the first packet.
+                #[cfg(target_os = "android")]
+                {
+                    if let Ok(local) = local_ip_address::local_ip() {
+                        if let IpAddr::V4(v4) = local {
+                            if let Some(bcast) = subnet_broadcast_v4(v4) {
+                                let _ = sock.send_to(&pkt, bcast.as_str()).await;
+                                // If the primary local IP is cellular (10.x.x.x),
+                                // also try known Android hotspot subnet ranges
+                                // in case the AP interface has a different IP.
+                                // Android uses 192.168.43.x or 192.168.49.x
+                                // depending on OEM and Android version.
+                                let o = v4.octets();
+                                if o[0] == 10 {
+                                    // Primary IP is cellular. Probe both known
+                                    // Android hotspot AP subnets directly.
+                                    let _ = sock.send_to(
+                                        &pkt,
+                                        format!("192.168.43.255:{BROADCAST_PORT}").as_str(),
+                                    ).await;
+                                    let _ = sock.send_to(
+                                        &pkt,
+                                        format!("192.168.49.255:{BROADCAST_PORT}").as_str(),
+                                    ).await;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Adaptive interval: be loud when the subnet is quiet so newly
-                // powered-on peers (or peers recovering from a hotspot drop) hear
-                // us within 2 s. Once a peer is confirmed, back off to 8 s.
+                // powered-on peers hear us within 2 s.
                 let interval = if state_c.lock().await.devices.is_empty() {
                     ANNOUNCE_INTERVAL_FAST
                 } else {

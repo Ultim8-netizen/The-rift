@@ -6,79 +6,48 @@
 //! (a) Radio idle eviction
 //!     WiFi adapters drop their 802.11 association when no frames are transmitted
 //!     for 10–30 s (varies by AP firmware, worst on OEM Android hotspot drivers).
-//!     This explains "unable to find device it is connected to" and "disconnection
-//!     before transfer starts" — the link is physically gone before Rust even
-//!     opens a socket.
 //!
 //! (b) Cellular rerouting (Android 10+, hotspot client side)
 //!     When the hotspot network has no internet access, Android's connectivity
 //!     service marks it as "not satisfied" and routes new TCP connections over
-//!     the default (cellular) network instead. Discovered peers appear reachable
-//!     but every connect() attempt goes over LTE, not WiFi. Mitigated in
-//!     RiftService.kt via bindProcessToNetwork.
+//!     the default (cellular) network instead. Mitigated in RiftService.kt via
+//!     the corrected bindProcessToNetwork strategy.
 //!
 //! (c) ARP table eviction / stale gateway
 //!     The gateway's ARP table evicts idle clients, causing the first outbound
 //!     packet after a quiet period to require an ARP round-trip before the radio
-//!     can transmit. This causes the 5–30 s "takes too long to connect" symptom.
+//!     can transmit.
 //!
-//! Mitigations in this module
-//! ──────────────────────────
-//! 1. UDP bond ping to the gateway every BOND_PING_INTERVAL (1 s).
-//!    The outbound frame traverses the full L2 path (NIC → AP radio → AP NIC),
-//!    preventing radio idle eviction AND refreshing the gateway's ARP entry so
-//!    the next real packet does not pay an ARP penalty.
+//! ── Android AP host mode — directed subnet bond pings ────────────────────────
 //!
-//! 2. Broadcast ping every tick as a fallback when gateway is unknown (hotspot
-//!    host device, emulator, DHCP not yet complete).
+//! When mobile is the hotspot AP host, 255.255.255.255 bond pings follow the
+//! default route (cellular), not the AP interface. PC clients on 192.168.43.x
+//! do not receive these pings and the AP radio can idle-evict.
 //!
-//! 3. Peer-absence rescan: if no devices appear in state for PEER_ABSENCE_RESCAN_SECS
-//!    re-trigger subnet scan on desktop so we catch peers that started before us or
-//!    were missed during the initial startup window.
-//!
-//! Note: Android process-to-network binding (cellular rerouting fix) lives in
-//! RiftService.kt — it requires ConnectivityManager which is Java-only.
-//!
-//! Windows terminal flash fix
-//! ──────────────────────────
-//! Gateway detection on Windows spawns route.exe. The refresh condition was
-//! previously `gateway.is_none() || ticks % REFRESH == 0` — if route.exe ever
-//! failed (no default route, UAC, etc.) gateway stayed None permanently and
-//! route.exe was re-spawned on every 1-second tick, causing endless terminal
-//! flashing. Fixed by using `ticks % REFRESH == 0` only: tick 0 fires
-//! immediately (0 % 60 == 0), subsequent retries wait the full 60-second window.
-//! gateway.rs independently adds CREATE_NO_WINDOW so any remaining spawn is silent.
+//! Fix: on Android, additionally send bond pings to the local /24 directed
+//! broadcast (192.168.43.255) and to known Android hotspot subnet broadcasts.
+//! These use the AP routing table entry (direct route) and keep the AP radio
+//! alive regardless of the default route configuration.
 
 use crate::state::SharedState;
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 use tokio::net::UdpSocket;
 
-/// How often to send a bond ping. 1 s is well below any observed radio idle
-/// eviction timer (shortest tested: 8 s on TECNO hotspot driver).
-/// Packets are 9 bytes — negligible bandwidth at any link speed.
 #[allow(dead_code)]
 const BOND_PING_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Re-trigger subnet scan if no peers are seen for this many seconds.
 #[allow(dead_code)]
 const PEER_ABSENCE_RESCAN_SECS: u64 = 20;
 
-/// Re-read the gateway IP every N ticks (~60 s) to handle DHCP renewals.
-/// Also controls how long we wait before retrying a failed gateway detection.
-/// At 1-second tick intervals this is one route.exe spawn per minute maximum.
 const GATEWAY_REFRESH_TICKS: u32 = 60;
-
-/// Port used for bond pings. Matches our own broadcast port so the packet
-/// is not alien to AP traffic shapers; any Rift instance receiving it will
-/// discard it silently (parse_packet in broadcast.rs checks "RIFT|" prefix).
 const BOND_TARGET_PORT: u16 = 7476;
 
 /// Payload intentionally does not start with "RIFT|" so broadcast.rs drops it.
 const BOND_PING_PAYLOAD: &[u8] = b"RIFT-BOND";
 
 pub async fn start_bond_keeper(state: SharedState, _app: AppHandle) -> anyhow::Result<()> {
-    // Bind to an ephemeral port so we can send to broadcast addresses.
     let sock = UdpSocket::bind("0.0.0.0:0").await?;
     sock.set_broadcast(true)?;
 
@@ -95,14 +64,10 @@ pub async fn start_bond_keeper(state: SharedState, _app: AppHandle) -> anyhow::R
         interval.tick().await;
 
         // ── Gateway refresh ───────────────────────────────────────────────────
-        // Refresh on tick 0 (startup) and every GATEWAY_REFRESH_TICKS thereafter.
-        //
-        // IMPORTANT: do NOT use `gateway.is_none() || ticks % REFRESH == 0`.
-        // If gateway detection fails (e.g. no default route on Windows), that
-        // condition re-spawns route.exe on every 1-second tick for the entire
-        // lifetime of the app, causing continuous terminal window flashing that
-        // makes the desktop unusable. The modulo-only guard limits retries to
-        // once per 60 seconds regardless of whether the previous attempt succeeded.
+        // Tick 0 fires immediately (0 % 60 == 0). Subsequent retries wait the
+        // full 60-second window regardless of whether the previous attempt
+        // succeeded. This prevents route.exe from being spawned every second
+        // when no default route exists.
         if gateway_ticks % GATEWAY_REFRESH_TICKS == 0 {
             match super::gateway::get_gateway_ip().await {
                 Ok(gw) => {
@@ -114,25 +79,19 @@ pub async fn start_bond_keeper(state: SharedState, _app: AppHandle) -> anyhow::R
                 Err(_) => {
                     // Non-fatal: hotspot host device, emulator, or WiFi not yet
                     // associated. Broadcast-only fallback keeps the radio alive.
-                    // Next retry in GATEWAY_REFRESH_TICKS seconds (not next tick).
                 }
             }
         }
         gateway_ticks = gateway_ticks.wrapping_add(1);
 
         // ── Bond ping to gateway (primary) ────────────────────────────────────
-        // Targeted unicast: works even on APs that filter broadcast/multicast
-        // in power-save mode. Also refreshes the AP's ARP entry for this host,
-        // eliminating the ARP round-trip penalty on the next real connection.
         if let Some(ref gw) = gateway {
             let dest = format!("{gw}:{BOND_TARGET_PORT}");
             let _ = sock.send_to(BOND_PING_PAYLOAD, &dest).await;
         }
 
-        // ── Bond ping to broadcast (fallback) ─────────────────────────────────
-        // Covers the case where gateway detection fails (hotspot host, DHCP
-        // incomplete). Also keeps radios alive on both sides of the link when
-        // a peer is visible but no rift_channel connection exists yet.
+        // ── Bond ping to limited broadcast ────────────────────────────────────
+        // Works when sockets are correctly bound; covers the client-mode case.
         let _ = sock
             .send_to(
                 BOND_PING_PAYLOAD,
@@ -140,10 +99,55 @@ pub async fn start_bond_keeper(state: SharedState, _app: AppHandle) -> anyhow::R
             )
             .await;
 
-        // ── Peer-absence rescan (desktop only) ────────────────────────────────
-        // On Android, the accelerated broadcast interval (2 s when no peers)
-        // combined with mDNS re-announce covers this case. Subnet scan on
-        // Android would require ICMP which is blocked without root.
+        // ── Android: directed subnet bond pings (AP host mode) ────────────────
+        //
+        // 255.255.255.255 follows the default route (cellular) when mobile is
+        // the AP host. We additionally send to:
+        //   1. /24 broadcast of the primary local IP (works if local_ip returns
+        //      the AP interface address, e.g., 192.168.43.1)
+        //   2. Known Android hotspot subnet broadcasts (192.168.43.255 and
+        //      192.168.49.255) as a fallback when local_ip returns cellular
+        //      (10.x.x.x) — guarantees the AP radio stays alive regardless of
+        //      which IP the crate resolves first.
+        //
+        // These packets use the AP routing table entry (direct route) and are
+        // delivered through the AP interface to PC clients.
+        #[cfg(target_os = "android")]
+        {
+            let mut sent_43 = false;
+            let mut sent_49 = false;
+
+            if let Ok(local) = local_ip_address::local_ip() {
+                if let IpAddr::V4(v4) = local {
+                    if !v4.is_loopback() && !v4.is_link_local() {
+                        let o = v4.octets();
+                        let sb = format!("{}.{}.{}.255:{BOND_TARGET_PORT}",
+                            o[0], o[1], o[2]);
+                        let _ = sock.send_to(BOND_PING_PAYLOAD, sb.as_str()).await;
+                        // Track which known AP subnets were covered.
+                        if o[0] == 192 && o[1] == 168 && o[2] == 43 { sent_43 = true; }
+                        if o[0] == 192 && o[1] == 168 && o[2] == 49 { sent_49 = true; }
+                    }
+                }
+            }
+
+            // Ensure both known Android hotspot subnets are always pinged,
+            // even if local_ip returned a cellular address (10.x.x.x).
+            if !sent_43 {
+                let _ = sock.send_to(
+                    BOND_PING_PAYLOAD,
+                    format!("192.168.43.255:{BOND_TARGET_PORT}").as_str(),
+                ).await;
+            }
+            if !sent_49 {
+                let _ = sock.send_to(
+                    BOND_PING_PAYLOAD,
+                    format!("192.168.49.255:{BOND_TARGET_PORT}").as_str(),
+                ).await;
+            }
+        }
+
+        // ── Peer-absence rescan (desktop only; Android uses accelerated broadcast) ─
         let no_peers = state.lock().await.devices.is_empty();
 
         if no_peers && last_rescan.elapsed().as_secs() >= PEER_ABSENCE_RESCAN_SECS {

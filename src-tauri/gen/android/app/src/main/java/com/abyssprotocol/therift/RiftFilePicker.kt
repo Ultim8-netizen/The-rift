@@ -36,6 +36,23 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Contract changed from GetMultipleContents → OpenMultipleDocuments.
  * pickerInFlight guard + onResume clearing added.
  *
+ * ── Poller daemon stability ───────────────────────────────────────────────────
+ *
+ * The RiftPickPoller daemon MUST NOT exit for any reason other than process
+ * termination. It is a daemon thread (isDaemon = true) and will be collected
+ * with the process automatically. The previous code broke here:
+ *
+ *   InterruptedException catch { break }  ← WRONG
+ *
+ * Android may interrupt daemon threads during low-power modes, GC pauses, or
+ * low-memory events. When this happened, pollerStarted stayed true (AtomicBool
+ * compareAndSet never resets it), so the daemon could never restart. Every
+ * subsequent pick attempt would set PICK_REQUESTED = true, find nobody reading
+ * it, and time out after 5 minutes — producing the "both failed" error banner.
+ *
+ * Fix: the InterruptedException catch simply logs and continues without break.
+ * The daemon runs until process death regardless of system interruptions.
+ *
  * ── Contract change: GetMultipleContents → OpenMultipleDocuments ─────────────
  *
  * GetMultipleContents wraps ACTION_GET_CONTENT. On many OEM Android builds
@@ -98,11 +115,6 @@ object RiftFilePicker {
      * True from the moment launcher.launch() is posted to the main thread until
      * onPickerResult() runs (success or cancellation) or clearPickerGuard()
      * resets it (OEM callback-drop recovery).
-     *
-     * Guards against the "permanent deadlock" scenario: without this flag,
-     * trigger_android_picker_tier2() would register a new PICK_SENDER for every
-     * tap, and if the old tap's callback is dropped by the OEM, every new
-     * attempt finds "picker already open" in the Rust mutex and bails to Tier 3.
      */
     @Volatile
     private var pickerInFlight: Boolean = false
@@ -119,10 +131,6 @@ object RiftFilePicker {
     /**
      * Must be called from MainActivity.onCreate(), before onStart().
      * ActivityResultLauncher has a hard lifecycle requirement on this ordering.
-     *
-     * Registers the launcher with OpenMultipleDocuments (ACTION_OPEN_DOCUMENT)
-     * and caches the RiftFilePicker class GlobalRef in Rust for future use.
-     * Does NOT start the poller — call startPickPoller() separately after this.
      */
     fun register(activity: MainActivity) {
         launcher = activity.registerForActivityResult(
@@ -141,26 +149,23 @@ object RiftFilePicker {
         }
     }
 
-    // ── Poll daemon (the missing Kotlin side of Tier 2) ───────────────────────
+    // ── Poll daemon ───────────────────────────────────────────────────────────
 
     /**
      * Starts the Kotlin-side poll daemon for Tier 2 file picking.
      * Safe to call multiple times — exactly one daemon runs per process lifetime
      * (guarded by pollerStarted AtomicBoolean).
      *
-     * WHAT IT DOES:
-     *   Polls nativeGetPickRequest() [Kotlin→Rust] every 100ms. When Rust sets
-     *   PICK_REQUESTED = true (via trigger_android_picker_tier2), this function
-     *   returns true exactly once (compare-exchange atomically clears the flag).
-     *   The daemon then posts launcher.launch() to the main thread.
+     * The daemon polls nativeGetPickRequest() every 100ms. When Rust sets
+     * PICK_REQUESTED = true, this function returns true exactly once and posts
+     * launcher.launch() to the main thread.
      *
-     * WHY THIS DIRECTION IS SAFE:
-     *   All JNI calls go Kotlin→Rust. This daemon is a plain Kotlin thread with
-     *   no Tauri IPC history — no stale exception state. nativeGetPickRequest()
-     *   is a simple atomic read-and-clear in Rust. JavaException is impossible.
-     *
-     * MUST be called from MainActivity.onCreate() AFTER register() so that
-     * `launcher` is non-null when the first PICK_REQUESTED is seen.
+     * CRITICAL: The daemon must never exit. Android may interrupt daemon threads
+     * during low-power or low-memory events (InterruptedException on sleep).
+     * If the daemon exits, pollerStarted stays true and cannot restart, meaning
+     * PICK_REQUESTED is set by Rust but nobody reads it — every subsequent file
+     * pick times out after 5 minutes. The InterruptedException handler must
+     * therefore NOT break out of the loop.
      */
     fun startPickPoller(activity: MainActivity) {
         if (!pollerStarted.compareAndSet(false, true)) {
@@ -173,28 +178,18 @@ object RiftFilePicker {
             while (true) {
                 try {
                     if (nativeGetPickRequest()) {
-                        // PICK_REQUESTED was true — atomically cleared by nativeGetPickRequest.
-                        // One pick request is now in flight. Post to main thread.
                         Handler(Looper.getMainLooper()).post {
                             try {
                                 val l = launcher
                                 if (l == null) {
                                     Log.e(TAG, "Poller: launcher is null — register() not called?")
-                                    // Do NOT set pickerInFlight — there's nothing in flight.
                                     safeSignalEmpty()
                                     return@post
                                 }
-                                // Set BEFORE launch so clearPickerGuard() can detect
-                                // the in-flight state immediately on the next onResume.
                                 pickerInFlight = true
-                                // OpenMultipleDocuments.launch() requires Array<String> of
-                                // MIME types. "*/*" = all file types, no restriction.
                                 l.launch(arrayOf("*/*"))
                                 Log.i(TAG, "Picker launched via OpenMultipleDocuments (*/*)")
                             } catch (e: Throwable) {
-                                // Covers ActivityNotFoundException (no system picker installed —
-                                // extremely rare on Android 4.4+), IllegalStateException (Activity
-                                // in wrong lifecycle state), OutOfMemoryError, etc.
                                 Log.e(TAG, "launcher.launch() failed (${e::class.simpleName}): ${e.message}")
                                 pickerInFlight = false
                                 safeSignalEmpty()
@@ -202,8 +197,6 @@ object RiftFilePicker {
                         }
                     }
                 } catch (e: UnsatisfiedLinkError) {
-                    // Native library not yet linked — normal for the first few milliseconds
-                    // after process start. Log at VERBOSE to avoid logcat spam.
                     Log.v(TAG, "nativeGetPickRequest: library not ready yet — retrying in 100ms")
                 } catch (e: Throwable) {
                     Log.e(TAG, "Poller iteration error (${e::class.simpleName}): ${e.message}")
@@ -211,14 +204,19 @@ object RiftFilePicker {
 
                 try {
                     Thread.sleep(100)
-                } catch (e: InterruptedException) {
-                    Log.w(TAG, "RiftPickPoller interrupted — exiting")
-                    break
+                } catch (_: InterruptedException) {
+                    // Android may interrupt daemon threads during low-power states,
+                    // GC pauses, or low-memory events. The poller MUST NOT exit —
+                    // it is the sole consumer of PICK_REQUESTED for the entire
+                    // process lifetime. As a daemon thread (isDaemon = true) it
+                    // will be terminated automatically when the process exits.
+                    // Logging at VERBOSE to avoid logcat noise during normal operation.
+                    Log.v(TAG, "RiftPickPoller: sleep interrupted — continuing (daemon does not exit)")
                 }
             }
         }.also {
-            it.isDaemon = true          // Dies when the process exits — never blocks termination
-            it.name = "RiftPickPoller"  // Visible in Android Studio's Threads view
+            it.isDaemon = true
+            it.name    = "RiftPickPoller"
             it.start()
         }
 
@@ -230,19 +228,10 @@ object RiftFilePicker {
     /**
      * Called from MainActivity.onResume().
      *
-     * Scenario: ACTION_OPEN_DOCUMENT picker was launched (pickerInFlight = true),
-     * but the system never delivered a result to onPickerResult (OEM bug on some
-     * Transsion/TECNO, Samsung, or MIUI builds). The user sees The Rift come back
-     * to the foreground with no feedback. Without this method, pickerInFlight stays
-     * true for the rest of the process lifetime and every subsequent pick attempt
-     * fails instantly with "picker already open".
-     *
-     * Fix: onResume fires after the user returns. If pickerInFlight is still true
-     * at that point, the picker result was dropped. We clear the flag and deliver
-     * an empty result to Rust so pick_files_for_send unblocks immediately.
-     *
-     * If onPickerResult ran normally (picker returned, callback was invoked),
-     * pickerInFlight is already false and this method is a complete no-op.
+     * If the picker was launched but onPickerResult was never called (OEM bug),
+     * pickerInFlight stays true. This method detects that state, resets it, and
+     * delivers an empty result to Rust so pick_files_for_send unblocks
+     * immediately rather than waiting for the 5-minute timeout.
      */
     fun clearPickerGuard() {
         if (pickerInFlight) {
@@ -261,18 +250,12 @@ object RiftFilePicker {
 
     /**
      * Called on the MAIN THREAD when the system picker returns.
-     *
-     * Clears pickerInFlight FIRST so that clearPickerGuard() (called in onResume,
+     * Clears pickerInFlight FIRST so clearPickerGuard() (called in onResume,
      * which fires after this callback on some Android versions) is always a no-op
      * when the picker worked correctly.
-     *
-     * Spawns a single worker thread to copy all URIs to the app's private cache.
-     * The URI permission is live: we are within the task that received the grant,
-     * and the copying thread is spawned while the Activity is still in the
-     * foreground (it cannot be destroyed while we are in this callback).
      */
     private fun onPickerResult(context: Context, uris: List<Uri>) {
-        pickerInFlight = false  // Clear before any async work
+        pickerInFlight = false
 
         if (uris.isEmpty()) {
             Log.i(TAG, "Picker returned 0 URIs — user cancelled or picker dismissed")
@@ -295,16 +278,6 @@ object RiftFilePicker {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /**
-     * Calls nativeOnFilesSelected(emptyArray()) without allowing any exception
-     * to propagate. Centralises all "unblock Rust with empty result" code paths.
-     *
-     * If nativeOnFilesSelected itself throws (UnsatisfiedLinkError if the library
-     * never loaded, or a Rust panic wrapped as a RuntimeException), the exception
-     * is swallowed and logged. Rust will time out on its channel receiver — an
-     * acceptable degraded state compared to a JavaException crossing the JNI
-     * boundary and crashing the command.
-     */
     private fun safeSignalEmpty() {
         try {
             nativeOnFilesSelected(emptyArray())
@@ -323,23 +296,14 @@ object RiftFilePicker {
      * Copies one content:// URI into the app's private cache directory.
      * Returns "displayName\nabsolutePath\nsizeBytes" on success, null on failure.
      *
-     * With OpenMultipleDocuments (ACTION_OPEN_DOCUMENT), URIs are persistable:
-     * takePersistableUriPermission succeeds and the grant survives process restart.
-     * The copy is still performed here (inside the task that received the grant)
-     * to produce plain absolute paths that Rust can open without any content://
-     * machinery, eliminating all OEM-specific URI permission edge cases.
-     *
-     * Fallback strategy: some Samsung Gallery and TECNO Documents providers return
-     * null from openInputStream() but succeed via openFileDescriptor(). We try
-     * openInputStream first and fall back to the file-descriptor path.
+     * The cache file is named: rift_send_{timestamp_ms}_{sanitized_display_name}
+     * android_fs::resolve_single() strips this prefix to restore the original
+     * display name before the file enters the transfer manifest.
      */
     private fun copyUriToCache(context: Context, uri: Uri): String? {
         return try {
             val resolver = context.contentResolver
 
-            // Persist the URI read grant for future access.
-            // Succeeds for ACTION_OPEN_DOCUMENT; SecurityException for ACTION_GET_CONTENT
-            // (not used here, but guarded for safety in case of future code changes).
             try {
                 resolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 Log.d(TAG, "URI grant persisted: $uri")
@@ -402,7 +366,8 @@ object RiftFilePicker {
             Log.i(TAG, "Cached: $uri → ${dest.absolutePath} ($size B)")
 
             // Newline-delimited: displayName, absolutePath, sizeBytes.
-            // Newlines cannot appear in Android file names or absolute paths.
+            // android_fs::resolve_single() strips the rift_send_ prefix from
+            // absolutePath's filename to recover displayName as the transfer name.
             "$displayName\n${dest.absolutePath}\n$size"
 
         } catch (e: Exception) {
@@ -413,35 +378,12 @@ object RiftFilePicker {
 
     // ── JNI declarations — ALL Kotlin→Rust direction ──────────────────────────
 
-    /**
-     * Called from register() on the main thread.
-     * Caches the RiftFilePicker class GlobalRef in Rust's PICKER_CLASS OnceLock.
-     * Runs on the main thread so the app class loader is active (FindClass from
-     * a worker thread uses the bootstrap loader and cannot find app classes).
-     */
     @JvmStatic
     private external fun nativeRegisterPickerClass()
 
-    /**
-     * Called from the RiftPickPoller daemon thread every 100ms.
-     * Atomically reads-and-clears PICK_REQUESTED in android_fs.rs via
-     * compare_exchange(true, false). Returns JNI_TRUE exactly once per
-     * trigger_android_picker_tier2() invocation.
-     *
-     * DIRECTION: Kotlin→Rust. Runs on a Kotlin-managed daemon thread.
-     * No Tauri stale-exception state. No ExceptionCheck risk. Safe.
-     */
     @JvmStatic
     private external fun nativeGetPickRequest(): Boolean
 
-    /**
-     * Called from the worker thread spawned in onPickerResult() after all cache
-     * copies complete. Also called by safeSignalEmpty() on all error/cancel paths.
-     * paths: each element is "displayName\nabsolutePath\nsizeBytes".
-     * Empty array signals cancellation or total failure.
-     *
-     * DIRECTION: Kotlin→Rust. Safe.
-     */
     @JvmStatic
     private external fun nativeOnFilesSelected(paths: Array<String>)
 }

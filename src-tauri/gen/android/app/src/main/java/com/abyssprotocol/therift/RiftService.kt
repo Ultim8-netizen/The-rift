@@ -45,21 +45,46 @@ import androidx.core.app.ServiceCompat
  *     Without this, the rift-channel TCP ping loop suspends and
  *     connections time out within 30-60 s of screen lock.
  *
- * Additionally, this service binds the process to the WiFi network via
- * ConnectivityManager.bindProcessToNetwork(). This is critical on Android 10+
- * when The Rift is operating as a hotspot CLIENT:
+ * ── bindProcessToNetwork: corrected strategy ─────────────────────────────────
  *
- *   Problem: If the hotspot network has no upstream internet access, Android
- *   marks it as "not satisfied" and routes all new TCP connections over the
- *   default network (typically cellular). Rust's tokio runtime then opens
- *   connections over LTE — devices appear discovered (UDP broadcast works on
- *   all interfaces) but every connect() attempt goes over the wrong network.
- *   Result: "unable to find device", timeouts, and mid-transfer disconnects.
+ * PREVIOUS STRATEGY (broken for AP host mode):
+ *   onAvailable → bind to WiFi network
+ *   onLost      → hold binding (for fast-fail on reconnect)
  *
- *   Fix: bindProcessToNetwork() forces ALL new sockets in this process to use
- *   the specified WiFi network, regardless of whether it has internet access.
- *   A NetworkCallback fires immediately for already-connected WiFi and on
- *   every subsequent WiFi availability change, keeping the binding current.
+ * WHY IT BROKE:
+ *   When mobile is the hotspot AP host, the AP interface (ap0/wlan_ap0,
+ *   typically 192.168.43.1) is NOT reported as a TRANSPORT_WIFI network
+ *   by ConnectivityManager. If the mobile has no WiFi client connection,
+ *   no TRANSPORT_WIFI network ever becomes available. If the mobile had a
+ *   WiFi client connection that then dropped, the binding was held to a
+ *   dead/stale network.
+ *
+ *   Result: all Rust sockets — including UDP broadcasts in broadcast.rs —
+ *   were forced through a dead WiFi client network or cellular. UDP
+ *   broadcasts to 255.255.255.255 never reached PC clients on the
+ *   192.168.43.x AP subnet. Discovery from mobile to PC was completely
+ *   broken in AP host mode (the majority use-case on mobile).
+ *
+ * CORRECTED STRATEGY:
+ *   onAvailable  → bind to WiFi network (same as before)
+ *   onLost       → RELEASE binding (bindProcessToNetwork(null))
+ *   onUnavailable → RELEASE binding
+ *
+ * WHY RELEASE IS CORRECT:
+ *   With null binding, the OS uses its normal routing table:
+ *     192.168.43.0/24 → ap0 (AP clients reachable)
+ *     default         → cellular (internet traffic)
+ *   Discovery broadcasts and TCP transfers to 192.168.43.x are routed
+ *   through the AP interface. Combined with directed subnet broadcasts
+ *   (broadcast.rs) and subnet scan (lib.rs), this makes discovery
+ *   bidirectional in AP host mode.
+ *
+ * CONCERN: fast-fail reconnect after WiFi client drop
+ *   With null binding after WiFi loss, Rust's reconnect attempt might
+ *   briefly go through cellular before WiFi reconnects. This is
+ *   acceptable — the alternative (permanent discovery failure in AP
+ *   host mode) is far worse. The rift_channel reconnect loop handles
+ *   transient failures gracefully.
  */
 class RiftService : Service() {
 
@@ -73,40 +98,35 @@ class RiftService : Service() {
     private var multicastLock: WifiManager.MulticastLock? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
-    // ── WiFi network binding ──────────────────────────────────────────────────
-
     private var connectivityManager: ConnectivityManager? = null
 
     /**
      * NetworkCallback for WiFi transport.
      *
-     * onAvailable fires:
-     *   (a) Immediately after registerNetworkCallback if a matching WiFi
-     *       network is already active. This covers the case where the user
-     *       connected to the hotspot before launching The Rift.
-     *   (b) Whenever a new WiFi network becomes available (e.g. user connects
-     *       to the hotspot while the app is already running).
-     *
-     * onLost: we deliberately do NOT release the binding on loss. Keeping the
-     * dead binding causes Rust connection attempts to fail fast (OS detects the
-     * dead network within seconds and returns ENETDOWN), which triggers the
-     * rift_channel reconnect loop. Releasing the binding would silently reroute
-     * reconnect attempts over cellular — devices appear connected but on the
-     * wrong network, making them invisible to each other on the hotspot subnet.
+     * Strategy: bind on available, release on lost/unavailable.
+     * See class-level comment for full rationale.
      */
     private val wifiNetworkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             connectivityManager?.bindProcessToNetwork(network)
-            Log.i(TAG, "WiFi network available — process bound to $network (all Rust TCP → WiFi)")
+            Log.i(TAG, "WiFi network available — process bound to $network")
         }
 
         override fun onLost(network: Network) {
-            // Intentionally not releasing: see class-level comment above.
-            Log.w(TAG, "WiFi network lost: $network — holding binding for fast-fail reconnect")
+            // Release binding so default OS routing takes over.
+            // Critical for AP host mode: the AP interface (192.168.43.x)
+            // is not reported as TRANSPORT_WIFI. With null binding, the
+            // OS routing table correctly routes LAN traffic through ap0.
+            connectivityManager?.bindProcessToNetwork(null)
+            Log.w(TAG, "WiFi network lost: $network — binding released, OS routing active")
         }
 
         override fun onUnavailable() {
-            Log.w(TAG, "Requested WiFi transport unavailable on this device")
+            // No WiFi client network is available at all.
+            // This fires when mobile is in AP host mode with no upstream WiFi.
+            // Release binding so AP interface traffic routes correctly.
+            connectivityManager?.bindProcessToNetwork(null)
+            Log.w(TAG, "WiFi transport unavailable — binding released (AP host mode likely)")
         }
     }
 
@@ -142,10 +162,13 @@ class RiftService : Service() {
      * and immediately binds the process to any currently-active WiFi network.
      *
      * NET_CAPABILITY_INTERNET is deliberately omitted from the NetworkRequest.
-     * Hotspot client connections never satisfy that capability (the hotspot
-     * host has internet but the client-side network does not appear to have it
-     * from Android's perspective), so requiring it would exclude the exact
-     * networks we need to bind to.
+     * Hotspot client connections never satisfy that capability, so requiring it
+     * would exclude the exact networks we need to bind to.
+     *
+     * Note: when mobile is in AP host mode, this callback may never fire
+     * (the AP interface is not reported as TRANSPORT_WIFI). That is handled
+     * by the corrected onLost/onUnavailable strategy above — the process
+     * binding stays null and default routing through the AP interface is used.
      */
     private fun bindWifiNetwork() {
         val cm = getSystemService(CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -157,18 +180,15 @@ class RiftService : Service() {
 
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-            // No NET_CAPABILITY_INTERNET: hotspot networks won't have it.
             .build()
 
         try {
             cm.registerNetworkCallback(request, wifiNetworkCallback)
             Log.i(TAG, "WiFi NetworkCallback registered")
 
-            // Immediate binding: registerNetworkCallback fires onAvailable for
-            // existing networks, but there can be a short dispatch delay on some
-            // OEM builds. Binding here covers the zero-delay path so Rust's first
-            // connection attempt (which may happen within milliseconds of service
-            // start) already uses the WiFi network.
+            // Immediate binding for the case where WiFi is already connected
+            // before RiftService starts. The callback fires asynchronously so
+            // this covers the zero-delay path.
             val activeNet = cm.activeNetwork
             if (activeNet != null) {
                 val caps = cm.getNetworkCapabilities(activeNet)
@@ -182,11 +202,6 @@ class RiftService : Service() {
         }
     }
 
-    /**
-     * Unregisters the NetworkCallback and releases the process-to-network
-     * binding. Called from onDestroy so there are no dangling callbacks after
-     * the service stops.
-     */
     private fun releaseWifiBinding() {
         try {
             connectivityManager?.unregisterNetworkCallback(wifiNetworkCallback)

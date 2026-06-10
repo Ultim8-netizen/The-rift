@@ -5,6 +5,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -14,30 +16,61 @@ class MainActivity : TauriActivity() {
     companion object {
         private const val TAG = "MainActivity"
         private const val PERMISSION_REQUEST_CODE = 1337
+
+        /**
+         * Delay in milliseconds before clearPickerGuard() is checked in onResume.
+         *
+         * ROOT CAUSE (multi-file staging bug):
+         *   On standard Android, the ActivityResultLauncher callback (onPickerResult)
+         *   fires synchronously BEFORE onResume when returning from ACTION_OPEN_DOCUMENT.
+         *   By the time onResume fires, pickerInFlight is already false, and
+         *   clearPickerGuard() is a harmless no-op.
+         *
+         *   On some OEM builds (confirmed on TECNO/Transsion Camon/Spark series,
+         *   certain Samsung One UI builds), the lifecycle order is INVERTED:
+         *     onResume → ActivityResult callback
+         *   This is not documented but reproducible: when the user selects multiple
+         *   files (longer time in picker), onResume fires while pickerInFlight is
+         *   still true. clearPickerGuard() then:
+         *     1. Sees pickerInFlight = true
+         *     2. Calls safeSignalEmpty() which sends empty Vec to Rust's oneshot channel
+         *     3. Consumes the PICK_SENDER — the channel now has no sender
+         *   Later, onPickerResult fires with the actual N selected files:
+         *     4. Copies all URIs to cache ✓
+         *     5. Calls nativeOnFilesSelected([f1, f2, f3, ...])
+         *     6. Rust finds PICK_SENDER has no sender → "spurious call" log → DISCARDS files
+         *   Result: 0 files staged even though the user selected N files.
+         *
+         *   Single-file selection is less affected because the copy is fast enough
+         *   that onResume firing slightly early doesn't always win the race.
+         *
+         * FIX:
+         *   Post clearPickerGuard() with PICKER_GUARD_DELAY_MS delay. This gives
+         *   onPickerResult time to set pickerInFlight=false before the guard check.
+         *
+         *   If onPickerResult fires (success path):
+         *     pickerInFlight = false → delayed clearPickerGuard() is a no-op ✓
+         *   If onPickerResult never fires (true OEM picker-drop bug):
+         *     After PICKER_GUARD_DELAY_MS, clearPickerGuard() signals empty → Rust
+         *     unblocks immediately rather than waiting 5 minutes ✓
+         */
+        private const val PICKER_GUARD_DELAY_MS = 500L
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.i(TAG, "MainActivity created — API ${Build.VERSION.SDK_INT}")
 
-        // Repair icon alias state on each launch before any other initialisation.
-        // Enforces exactly one enabled alias, recovering from any crash that left
-        // two aliases enabled in a prior session. Runs on a background thread —
-        // PackageManager IPC must not block the main thread.
         Thread { IconSwitcher.repairOnStartup(applicationContext) }.start()
 
         RiftAndroidHelper.init(this)
 
-        // Step 1: Register the ActivityResultLauncher (OpenMultipleDocuments).
-        // Must happen before the activity reaches STARTED state — hard requirement
-        // from the ActivityResult API.
+        // Step 1: Register ActivityResultLauncher — must happen before STARTED state.
         RiftFilePicker.register(this)
 
-        // Step 2: Start the Kotlin poll daemon for Tier 2 file picking.
+        // Step 2: Start Kotlin poll daemon for Tier 2 file picking.
         // Must be called AFTER register() so launcher is non-null when the first
-        // PICK_REQUESTED signal arrives from Rust. Safe to call on every onCreate
-        // (Activity rotation, process restart) — pollerStarted AtomicBoolean
-        // ensures exactly one daemon runs per process lifetime.
+        // PICK_REQUESTED signal arrives from Rust.
         RiftFilePicker.startPickPoller(this)
 
         handlePermissionsAndStartService()
@@ -47,16 +80,22 @@ class MainActivity : TauriActivity() {
         super.onResume()
         RiftAndroidHelper.updateActivity(this)
 
-        // If the system picker was launched but never returned a result — an OEM
-        // bug where ACTION_OPEN_DOCUMENT resolves in a foreign task and drops the
-        // ActivityResultLauncher callback — pickerInFlight is still true here.
-        // clearPickerGuard() detects this state, resets it, and delivers an empty
-        // result to Rust so the pending pick_files_for_send command unblocks
-        // instead of waiting up to 5 minutes for the Tier 2 timeout.
+        // Delay clearPickerGuard() to prevent the OEM lifecycle race condition.
+        // See PICKER_GUARD_DELAY_MS companion constant for full explanation.
         //
-        // If the picker worked correctly (onPickerResult ran), pickerInFlight is
-        // already false and this call is a no-op.
-        RiftFilePicker.clearPickerGuard()
+        // Short version: on some OEM builds onResume fires BEFORE onPickerResult.
+        // If we call clearPickerGuard() immediately and pickerInFlight is still
+        // true, we consume the PICK_SENDER oneshot channel with an empty signal,
+        // causing all subsequently delivered files to be silently discarded.
+        //
+        // The 500ms delay ensures onPickerResult (which sets pickerInFlight=false)
+        // has time to run first on any OEM build. The delay does not affect any
+        // user-visible behavior: cancelled picker resolves instantly (pickerInFlight
+        // is false immediately), true picker-drop resolves after 500ms (vs the
+        // previous 5-minute timeout).
+        Handler(Looper.getMainLooper()).postDelayed({
+            RiftFilePicker.clearPickerGuard()
+        }, PICKER_GUARD_DELAY_MS)
     }
 
     override fun onStop() {
@@ -73,32 +112,20 @@ class MainActivity : TauriActivity() {
     private fun runtimePermissions(): Array<String> {
         val perms = mutableListOf<String>()
 
-        // API ≤ 28: WRITE covers general external storage access.
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
             perms.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
 
-        // API 29–32: READ_EXTERNAL_STORAGE covers all files in /storage/emulated/0/.
-        // Deprecated at API 33 but still honoured on those API levels.
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) {
             perms.add(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
 
-        // API 33+: Granular media permissions replace READ_EXTERNAL_STORAGE.
-        // These allow scan_android_dirs() to list DCIM, Pictures, Music, and
-        // Movies directories without requiring MANAGE_EXTERNAL_STORAGE (which
-        // requires Play Store approval). Downloads and Documents remain accessible
-        // without any permission on API 33+ for app-created files; third-party
-        // files in those directories require MANAGE_EXTERNAL_STORAGE for direct
-        // access, but OpenMultipleDocuments (ACTION_OPEN_DOCUMENT) covers those
-        // without any permission at all.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             perms.add(Manifest.permission.READ_MEDIA_IMAGES)
             perms.add(Manifest.permission.READ_MEDIA_VIDEO)
             perms.add(Manifest.permission.READ_MEDIA_AUDIO)
         }
 
-        // Notifications: required on API 33+ for the foreground service icon.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             perms.add(Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -132,10 +159,6 @@ class MainActivity : TauriActivity() {
             val granted = grantResults.count { it == PackageManager.PERMISSION_GRANTED }
             val denied  = grantResults.size - granted
             Log.i(TAG, "Permission results: $granted granted, $denied denied")
-            // Always start the service regardless of which permissions were granted.
-            // OpenMultipleDocuments works with zero storage permissions; the scan
-            // command produces a narrower result set without media permissions but
-            // remains functional.
             startRiftService()
         }
     }
