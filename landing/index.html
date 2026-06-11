@@ -20,6 +20,11 @@
   <meta name="theme-color" content="#08080e" />
   <title>The Rift v1.1.1 — by abyssprotocol</title>
 
+  <!-- Cormorant Garamond for the hero cursive title -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@1,600;1,700&display=swap" rel="stylesheet" />
+
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -98,7 +103,6 @@
       66%       { transform: translate(-18px, 28px) scale(0.95); }
     }
 
-    /* Dot grid overlay */
     .bg-dots {
       position: fixed;
       inset: 0;
@@ -132,6 +136,12 @@
 
     .nav-brand {
       display: flex;
+      flex-direction: column;
+      gap: 2px;
+      text-decoration: none;
+    }
+    .nav-brand-top {
+      display: flex;
       align-items: center;
       gap: 9px;
       font-size: 12px;
@@ -142,7 +152,14 @@
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       background-clip: text;
-      text-decoration: none;
+    }
+    /* abyssprotocol sub-label under "The Rift" in nav */
+    .nav-brand-by {
+      font-size: 7.5px;
+      letter-spacing: 0.28em;
+      text-transform: uppercase;
+      color: rgba(82,98,122,0.5);
+      padding-left: 16px; /* align past the pulse dot */
     }
 
     .nav-pulse {
@@ -219,12 +236,17 @@
       animation: blink 2.2s ease-in-out infinite;
     }
 
+    /* abyssprotocol eyebrow — elevated prominence */
     .hero-eyebrow {
-      font-size: 9px;
-      letter-spacing: 0.32em;
+      font-size: 10px;
+      letter-spacing: 0.36em;
       text-transform: uppercase;
-      color: rgba(82,98,122,0.5);
-      margin-bottom: 8px;
+      background: linear-gradient(110deg, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 12px;
+      opacity: 0.85;
     }
 
     .hero-title-wrap {
@@ -239,11 +261,14 @@
       pointer-events: none;
       z-index: -1;
     }
+    /* ── CURSIVE HERO TITLE ── */
     .hero-title {
-      font-size: clamp(62px, 12vw, 112px);
-      font-weight: 900;
-      letter-spacing: -0.055em;
-      line-height: 0.86;
+      font-family: 'Cormorant Garamond', Georgia, serif;
+      font-style: italic;
+      font-weight: 700;
+      font-size: clamp(72px, 14vw, 128px);
+      letter-spacing: -0.01em;
+      line-height: 0.88;
       background: linear-gradient(128deg, #ffffff 15%, #b8deff 40%, var(--accent) 62%, var(--accent2) 90%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
@@ -316,8 +341,6 @@
       position: relative;
       overflow: hidden;
     }
-
-    /* Shimmer sweep on hover */
     .btn::after {
       content: '';
       position: absolute;
@@ -338,7 +361,6 @@
       letter-spacing: 0.06em;
     }
 
-    /* Windows primary */
     .btn-win {
       background: linear-gradient(135deg, #00c8ff 0%, #009fc8 50%, #007aa8 100%);
       color: #040810;
@@ -355,7 +377,6 @@
         inset 0 1px 0 rgba(255,255,255,0.32);
     }
 
-    /* Windows MSI secondary */
     .btn-msi {
       background: linear-gradient(145deg, rgba(16,16,38,0.94), rgba(10,10,24,0.88));
       color: var(--text);
@@ -374,7 +395,6 @@
         inset 0 1px 0 rgba(255,255,255,0.08);
     }
 
-    /* Android */
     .btn-apk {
       background: linear-gradient(135deg, #142414 0%, #0d180d 100%);
       color: var(--android);
@@ -397,7 +417,6 @@
       background: linear-gradient(90deg, transparent, rgba(109,218,109,0.1), transparent);
     }
 
-    /* Ghost */
     .btn-ghost {
       background: transparent;
       color: var(--muted);
@@ -506,8 +525,6 @@
         inset 0 1px 0 rgba(255,255,255,0.05),
         inset 0 -1px 0 rgba(0,0,0,0.12);
     }
-
-    /* Top gloss line */
     .feature::before {
       content: '';
       position: absolute;
@@ -516,7 +533,6 @@
       background: linear-gradient(90deg, transparent, rgba(0,200,255,0.45), transparent);
       border-radius: 999px;
     }
-    /* Corner radiance */
     .feature::after {
       content: '';
       position: absolute;
@@ -525,7 +541,6 @@
       background: radial-gradient(circle at top right, rgba(0,200,255,0.09), transparent 70%);
       border-radius: 0 var(--r-lg) 0 0;
     }
-
     .feature:hover {
       transform: translateY(-5px);
       border-color: rgba(0,200,255,0.24);
@@ -589,7 +604,6 @@
         0 4px 22px rgba(0,0,0,0.28),
         inset 0 1px 0 rgba(255,255,255,0.04);
     }
-
     .cl-card::before {
       content: '';
       position: absolute;
@@ -598,7 +612,6 @@
       background: linear-gradient(90deg, transparent, rgba(0,255,170,0.38), transparent);
       border-radius: 999px;
     }
-
     .cl-title {
       display: flex;
       align-items: center;
@@ -617,7 +630,6 @@
       box-shadow: 0 0 7px var(--accent3);
       flex-shrink: 0;
     }
-
     .cl-list {
       list-style: none;
       display: flex;
@@ -679,7 +691,6 @@
         0 0 22px rgba(135,80,255,0.1),
         inset 0 1px 0 rgba(255,255,255,0.065);
     }
-
     .step-num {
       font-size: 40px;
       font-weight: 900;
@@ -707,7 +718,6 @@
       flex-wrap: wrap;
       justify-content: center;
     }
-
     .theme-swatch {
       display: flex;
       flex-direction: column;
@@ -721,9 +731,7 @@
       transition: all 0.22s ease;
       cursor: default;
     }
-    .swatch-disc:hover {
-      transform: scale(1.18) translateY(-3px);
-    }
+    .swatch-disc:hover { transform: scale(1.18) translateY(-3px); }
     .swatch-dot {
       position: absolute;
       bottom: 8px; right: 8px;
@@ -761,7 +769,6 @@
         0 8px 36px rgba(0,0,0,0.34),
         inset 0 1px 0 rgba(255,255,255,0.05);
     }
-
     .plat-card.pc::before {
       content: '';
       position: absolute;
@@ -785,7 +792,6 @@
         0 0 36px rgba(0,200,255,0.12),
         inset 0 1px 0 rgba(255,255,255,0.07);
     }
-
     .plat-card.droid::before {
       content: '';
       position: absolute;
@@ -809,7 +815,6 @@
         0 0 32px rgba(109,218,109,0.1),
         inset 0 1px 0 rgba(255,255,255,0.07);
     }
-
     .plat-icon {
       font-size: 38px;
       margin-bottom: 14px;
@@ -836,7 +841,6 @@
       position: relative;
       z-index: 1;
     }
-
     .plat-btns {
       display: flex;
       gap: 10px;
@@ -873,7 +877,6 @@
       transition: left 0.48s ease;
     }
     .pb:hover::after { left: 145%; }
-
     .pb-win-solid {
       background: linear-gradient(135deg, var(--accent), #0090bb);
       color: #040810;
@@ -908,6 +911,213 @@
     }
     .pb-droid::after {
       background: linear-gradient(90deg, transparent, rgba(109,218,109,0.1), transparent);
+    }
+
+    /* ─────── ABYSS BRAND STRIP ─────── */
+    .brand-strip {
+      width: 100%;
+      max-width: 920px;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 32px;
+      padding: 40px 44px;
+      background: linear-gradient(148deg, rgba(14,14,32,0.92), rgba(8,8,18,0.78));
+      border: 1px solid rgba(26,26,50,0.88);
+      border-radius: var(--r-xl);
+      backdrop-filter: blur(28px);
+      box-shadow:
+        0 8px 40px rgba(0,0,0,0.32),
+        inset 0 1px 0 rgba(255,255,255,0.04);
+      position: relative;
+      overflow: hidden;
+    }
+    .brand-strip::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 10%; right: 10%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(135,80,255,0.5), rgba(0,200,255,0.4), transparent);
+      border-radius: 999px;
+    }
+    .brand-strip::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse 55% 45% at 50% 0%, rgba(135,80,255,0.06), transparent 65%);
+      pointer-events: none;
+    }
+
+    .brand-strip-left {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .brand-strip-eyebrow {
+      font-size: 7.5px;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      color: rgba(82,98,122,0.5);
+    }
+    .brand-strip-name {
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      background: linear-gradient(110deg, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .brand-strip-tagline {
+      font-size: 9px;
+      color: rgba(82,98,122,0.55);
+      letter-spacing: 0.08em;
+      line-height: 1.7;
+      margin-top: 4px;
+    }
+
+    .brand-strip-center {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      position: relative;
+      z-index: 1;
+    }
+    .brand-sigil {
+      font-size: 30px;
+      line-height: 1;
+      opacity: 0.25;
+      filter: blur(0.5px);
+    }
+    .brand-sigil-label {
+      font-size: 7px;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      color: rgba(82,98,122,0.3);
+    }
+
+    .brand-strip-right {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      align-items: flex-end;
+    }
+    .brand-project-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 8.5px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: rgba(82,98,122,0.55);
+    }
+    .brand-project-item .dot {
+      width: 4px; height: 4px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot-cyan   { background: var(--accent);  box-shadow: 0 0 5px var(--accent); }
+    .dot-purple { background: var(--accent2); box-shadow: 0 0 5px var(--accent2); }
+    .dot-green  { background: var(--accent3); box-shadow: 0 0 5px var(--accent3); }
+    .dot-muted  { background: rgba(82,98,122,0.4); }
+
+    /* ─────── CONTACT SECTION ─────── */
+    .contact-wrap {
+      width: 100%;
+      max-width: 920px;
+    }
+
+    .contact-card {
+      background: linear-gradient(148deg, rgba(14,14,32,0.94), rgba(9,9,22,0.82));
+      border: 1px solid rgba(26,26,50,0.9);
+      border-radius: var(--r-xl);
+      padding: 44px 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0;
+      backdrop-filter: blur(28px);
+      box-shadow:
+        0 8px 38px rgba(0,0,0,0.3),
+        inset 0 1px 0 rgba(255,255,255,0.045);
+      position: relative;
+      overflow: hidden;
+    }
+    .contact-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 12%; right: 12%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(0,200,255,0.45), transparent);
+      border-radius: 999px;
+    }
+    .contact-card::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse 60% 40% at 50% 0%, rgba(0,200,255,0.05), transparent 60%);
+      pointer-events: none;
+    }
+
+    .contact-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+      padding: 24px 56px;
+      border-radius: var(--r-lg);
+      transition: all 0.2s ease;
+      position: relative;
+      z-index: 1;
+    }
+    .contact-item:hover {
+      background: rgba(0,200,255,0.05);
+    }
+
+    .contact-icon-wrap {
+      width: 46px; height: 46px;
+      border-radius: 14px;
+      background: rgba(0,200,255,0.08);
+      border: 1px solid rgba(0,200,255,0.18);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      transition: all 0.2s ease;
+      box-shadow: 0 0 16px rgba(0,200,255,0.08);
+    }
+    .contact-item:hover .contact-icon-wrap {
+      background: rgba(0,200,255,0.13);
+      border-color: rgba(0,200,255,0.36);
+      box-shadow: 0 0 24px rgba(0,200,255,0.18);
+    }
+
+    .contact-label {
+      font-size: 7.5px;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      color: rgba(82,98,122,0.5);
+    }
+    .contact-value {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      color: var(--text);
+      transition: color 0.18s;
+    }
+    .contact-item:hover .contact-value {
+      color: var(--accent);
+    }
+
+    .contact-sep {
+      width: 1px;
+      height: 80px;
+      background: linear-gradient(180deg, transparent, rgba(0,200,255,0.18), transparent);
+      flex-shrink: 0;
+      align-self: center;
     }
 
     /* ─────── CTA ─────── */
@@ -953,15 +1163,22 @@
       text-transform: uppercase;
       color: rgba(82,98,122,0.38);
     }
+    /* More substantial abyssprotocol mark in footer */
     .footer-by {
-      font-size: 8.5px;
-      letter-spacing: 0.2em;
+      font-size: 10px;
+      letter-spacing: 0.22em;
       text-transform: uppercase;
       background: linear-gradient(110deg, var(--accent), var(--accent2));
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       background-clip: text;
-      opacity: 0.65;
+      opacity: 0.8;
+    }
+    .footer-tagline {
+      font-size: 8px;
+      letter-spacing: 0.12em;
+      color: rgba(82,98,122,0.3);
+      margin-top: 2px;
     }
     .footer-links { display: flex; gap: 4px; align-items: center; }
     .footer-links a {
@@ -982,14 +1199,20 @@
     }
 
     /* ─────── RESPONSIVE ─────── */
+    @media (max-width: 700px) {
+      .brand-strip { grid-template-columns: 1fr; text-align: center; gap: 24px; padding: 32px 28px; }
+      .brand-strip-right { align-items: center; }
+      .contact-card { flex-direction: column; padding: 36px 24px; }
+      .contact-sep { width: 80px; height: 1px; background: linear-gradient(90deg, transparent, rgba(0,200,255,0.18), transparent); }
+      .contact-item { padding: 20px 24px; }
+    }
     @media (max-width: 620px) {
       nav { flex-direction: column; gap: 18px; margin-bottom: 68px; }
       .steps-grid { grid-template-columns: 1fr; }
       .platform-row { flex-direction: column; align-items: center; }
       footer { flex-direction: column; }
-      .hero-title { font-size: clamp(56px, 20vw, 100px); }
+      .hero-title { font-size: clamp(62px, 20vw, 100px); }
     }
-
     @media (prefers-reduced-motion: reduce) {
       .orb, .nav-pulse, .badge-dot { animation: none; }
       .btn, .feature, .step, .plat-card, .pb { transition: none; }
@@ -998,7 +1221,6 @@
 </head>
 <body>
 
-<!-- Ambient background -->
 <div class="bg-layer">
   <div class="orb orb-1"></div>
   <div class="orb orb-2"></div>
@@ -1012,13 +1234,17 @@
   <!-- ══ NAV ══ -->
   <nav>
     <a class="nav-brand" href="#">
-      <span class="nav-pulse"></span>
-      The Rift
+      <span class="nav-brand-top">
+        <span class="nav-pulse"></span>
+        The Rift
+      </span>
+      <span class="nav-brand-by">abyssprotocol</span>
     </a>
     <div class="nav-links">
       <a href="#features">Features</a>
       <a href="#how">How it works</a>
       <a href="#platforms">Platforms</a>
+      <a href="#contact">Contact</a>
       <a href="https://github.com/Ultim8-netizen/The-rift" target="_blank" rel="noopener" class="nav-gh">GitHub ↗</a>
     </div>
   </nav>
@@ -1033,7 +1259,7 @@
     <p class="hero-eyebrow">abyssprotocol</p>
     <div class="hero-title-wrap">
       <div class="hero-glow"></div>
-      <h1 class="hero-title">THE RIFT</h1>
+      <h1 class="hero-title">The Rift</h1>
     </div>
 
     <p class="hero-sub">
@@ -1109,6 +1335,42 @@
 
   <div class="divider"></div>
 
+  <!-- ══ ABYSSPROTOCOL BRAND STRIP ══ -->
+  <div class="brand-strip">
+    <div class="brand-strip-left">
+      <span class="brand-strip-eyebrow">Crafted by</span>
+      <span class="brand-strip-name">abyssprotocol</span>
+      <p class="brand-strip-tagline">
+        Independent software from the void.<br>
+        Built clean. Shipped real.
+      </p>
+    </div>
+    <div class="brand-strip-center">
+      <span class="brand-sigil">⬡</span>
+      <span class="brand-sigil-label">abyss</span>
+    </div>
+    <div class="brand-strip-right">
+      <div class="brand-project-item">
+        <span class="dot dot-cyan"></span>
+        The Rift — file transfer
+      </div>
+      <div class="brand-project-item">
+        <span class="dot dot-purple"></span>
+        F9 — freelance marketplace
+      </div>
+      <div class="brand-project-item">
+        <span class="dot dot-green"></span>
+        The Compendium — literary archive
+      </div>
+      <div class="brand-project-item">
+        <span class="dot dot-muted"></span>
+        Room 13 — realtime card game
+      </div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
   <!-- ══ FEATURES ══ -->
   <div class="s-header" id="features">
     <span class="s-eyebrow">Capabilities</span>
@@ -1116,60 +1378,51 @@
   </div>
 
   <section class="features">
-
     <div class="feature">
       <span class="feature-icon">⚡</span>
       <p class="feature-title">Multi-Stream Transfer Engine</p>
       <p class="feature-desc">4 parallel TCP worker streams per file, pipelined dispatch. BLAKE3 integrity verification on every chunk. An independent overseer cross-checks progress against the manifest in real time with live speed and ETA on both ends.</p>
       <span class="feature-new">New in v1.1.1</span>
     </div>
-
     <div class="feature">
       <span class="feature-icon">⬡</span>
       <p class="feature-title">Triple-Layer Discovery</p>
       <p class="feature-desc">mDNS for zero-config local resolution, UDP broadcast for cross-subnet reach, active subnet scan as fallback. Batch discovery events prevent UI frame drops at scan completion. Devices appear within seconds.</p>
       <span class="feature-new">New in v1.1.1</span>
     </div>
-
     <div class="feature">
       <span class="feature-icon">◉</span>
       <p class="feature-title">Android Native</p>
       <p class="feature-desc">Full native mobile layout with three-tab interface — Devices, Send, History. In-app file browser backed by a storage scanner, no system picker required. Three-tier fallback for maximum OEM compatibility. Android 7.0+.</p>
       <span class="feature-new">New in v1.1.1</span>
     </div>
-
     <div class="feature">
       <span class="feature-icon">⊞</span>
       <p class="feature-title">Windows Hotspot</p>
       <p class="feature-desc">Automated hotspot creation via WinRT with netsh fallback for older adapters. Detects an already-running hotspot without duplicating it. Join another device's hotspot directly from inside the app.</p>
       <span class="feature-new">New in v1.1.1</span>
     </div>
-
     <div class="feature">
       <span class="feature-icon">↻</span>
       <p class="feature-title">Connection Stability</p>
       <p class="feature-desc">Persistent TCP rift channel between transfers with bond-keeper pings every second — no radio idle eviction. Heartbeat monitoring with automatic device eviction after sustained failure. ~11-second dead-peer detection.</p>
       <span class="feature-new">New in v1.1.1</span>
     </div>
-
     <div class="feature">
       <span class="feature-icon">⤵</span>
       <p class="feature-title">Any File. Any Size.</p>
       <p class="feature-desc">Raw byte streaming with 4 MB chunked transfer. Videos, archives, ISOs, APKs — no restrictions. Resumable from the last verified chunk if a transfer is interrupted mid-stream.</p>
     </div>
-
     <div class="feature">
       <span class="feature-icon">◈</span>
       <p class="feature-title">Zero Configuration</p>
       <p class="feature-desc">Open the app on two devices and they find each other. No IP addresses, no pairing codes, no accounts, no cloud relay, no setup wizard. It simply works.</p>
     </div>
-
     <div class="feature">
       <span class="feature-icon">◑</span>
       <p class="feature-title">8 Themes</p>
       <p class="feature-desc">Void, Abyss, Slate, Cosmos, Rose, Citrus, Sky, and Auto — which follows your system preference. Dark and light palettes. Switch instantly, no restart required.</p>
     </div>
-
   </section>
 
   <div class="divider"></div>
@@ -1181,7 +1434,6 @@
   </div>
 
   <div class="changelog-grid">
-
     <div class="cl-card">
       <p class="cl-title"><span class="cl-dot"></span>Transfer Engine</p>
       <ul class="cl-list">
@@ -1192,7 +1444,6 @@
         <li class="cl-item">Real-time speed, progress, and ETA on sender and receiver</li>
       </ul>
     </div>
-
     <div class="cl-card">
       <p class="cl-title"><span class="cl-dot"></span>Discovery &amp; Stability</p>
       <ul class="cl-list">
@@ -1204,7 +1455,6 @@
         <li class="cl-item">~11-second dead-peer detection via TCP keepalive</li>
       </ul>
     </div>
-
     <div class="cl-card">
       <p class="cl-title"><span class="cl-dot"></span>Android</p>
       <ul class="cl-list">
@@ -1214,7 +1464,6 @@
         <li class="cl-item">Targets Android 7.0 and above</li>
       </ul>
     </div>
-
     <div class="cl-card">
       <p class="cl-title"><span class="cl-dot"></span>Everything Else</p>
       <ul class="cl-list">
@@ -1226,7 +1475,6 @@
         <li class="cl-item">Built-in help page and full reference guide</li>
       </ul>
     </div>
-
   </div>
 
   <div class="divider"></div>
@@ -1324,7 +1572,6 @@
   </div>
 
   <div class="platforms-grid">
-
     <div class="plat-card pc">
       <span class="plat-icon">⊞</span>
       <p class="plat-name">Windows</p>
@@ -1344,7 +1591,6 @@
         </a>
       </div>
     </div>
-
     <div class="plat-card droid">
       <span class="plat-icon">◉</span>
       <p class="plat-name">Android</p>
@@ -1360,7 +1606,6 @@
         </a>
       </div>
     </div>
-
   </div>
 
   <div class="divider"></div>
@@ -1391,17 +1636,43 @@
     </div>
   </section>
 
+  <!-- ══ CONTACT ══ -->
+  <div class="divider"></div>
+
+  <div class="s-header" id="contact">
+    <span class="s-eyebrow">abyssprotocol</span>
+    <h2 class="s-title">Get in touch</h2>
+  </div>
+
+  <div class="contact-wrap">
+    <div class="contact-card">
+      <a class="contact-item" href="mailto:eldergod263@gmail.com">
+        <div class="contact-icon-wrap">✉</div>
+        <span class="contact-label">Email</span>
+        <span class="contact-value">eldergod263@gmail.com</span>
+      </a>
+      <div class="contact-sep"></div>
+      <a class="contact-item" href="tel:+2349131256817">
+        <div class="contact-icon-wrap">◎</div>
+        <span class="contact-label">Phone / WhatsApp</span>
+        <span class="contact-value">+234 913 125 6817</span>
+      </a>
+    </div>
+  </div>
+
   <!-- ══ FOOTER ══ -->
   <div class="divider"></div>
   <footer>
     <div class="footer-left">
       <span class="footer-brand">the rift · v1.1.1 · open source</span>
-      <span class="footer-by">by abyssprotocol</span>
+      <span class="footer-by">abyssprotocol</span>
+      <span class="footer-tagline">independent software from the void</span>
     </div>
     <div class="footer-links">
       <a href="https://github.com/Ultim8-netizen/The-rift" target="_blank" rel="noopener">Source</a>
       <a href="https://github.com/Ultim8-netizen/The-rift/releases" target="_blank" rel="noopener">Releases</a>
       <a href="https://github.com/Ultim8-netizen/The-rift/issues" target="_blank" rel="noopener">Report Bug</a>
+      <a href="#contact">Contact</a>
     </div>
   </footer>
 
